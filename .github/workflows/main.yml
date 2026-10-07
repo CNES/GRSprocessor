@@ -1,0 +1,216 @@
+name: Pipeline CI
+
+on:
+  push:
+    branches:
+      - 'feature/*'
+      - 'release/*'
+      - 'hotfix/*'
+      - 'bugfix/*'
+      - main
+      - develop
+    tags:
+      - '*'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+
+env:
+  DOCKER_IMAGE_NAME : "grs"
+
+jobs:
+# =============================================================================
+# test
+# =============================================================================
+  python-tests:
+   runs-on: ubuntu-latest
+   steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installation du paquet gdal
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin libgdal-dev
+
+      - name: Installation dépendances et lancement des tests
+        run: |
+          echo "Création de l'environnement python"
+          python -m venv python_env
+          . python_env/bin/activate
+          python -m pip install --upgrade pip
+          GDAL_VERSION=$(gdal-config --version)
+          echo "GDAL system version: $GDAL_VERSION"
+
+          echo "Installation des dépendances via pip"
+          python -m pip install GDAL==$GDAL_VERSION
+          python -m pip install -r requirements.txt --no-cache-dir --force-reinstall
+          python -m pip install pytest pytest-cov
+          python -m pip install -U datashader # la version du requirements.txt n'est plus compatible avec dask
+                           
+          echo "Lancement des tests du répertoire  grs/tests/integration_tests/"
+          python -m pytest --tb=short -vv -s -x grs/tests/integration_tests/ --cov=grs --cov-report=html:cov_html --cov-report=xml:coverage.xml --junitxml=test-results.xml
+          
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "Génération du badge coverage"
+            python -m pip install genbadge[coverage]
+            mkdir -p badges
+         
+            genbadge coverage -i coverage.xml -o badges/coverage.svg
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add badges/coverage.svg
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update coverage badge [skip ci]"
+              git push
+            fi
+          fi
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: false
+        #if: always()   # Upload même si les tests échouent
+        with:
+          name: test-reports
+          path : | 
+            coverage.xml
+            test-results.xml
+            cov_html/
+          retention-days: 1
+
+# =============================================================================
+# package — Publication sur Pypi
+# =============================================================================
+  pypi:
+    needs: python-tests
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name : Build
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+          python -m build
+
+      - name: Publication sur Pypi
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+
+# =============================================================================
+# package — Build & Publication sur Docker Hub
+# =============================================================================
+  podman-build:
+    needs: python-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: |
+          echo "DOCKER_IMAGE_NAME=${DOCKER_IMAGE_NAME}"
+          export VERSION_GRS=$(grep version pyproject.toml | cut -d '"' -f 2)
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "Tag : $GITHUB_REF_NAME"
+            export VERSION_GRS=${GITHUB_REF_NAME};
+          fi
+          # TEMPORARY: force la version 2.1.9 sur feature/dev-ci pour republier
+          # l'image cassée guillaumeeb/grs:2.1.9 (fix packaging grs.data.auxiliary)
+          # sans toucher au tag git v2.1.9. A retirer une fois l'image republiée.
+          if [ "$GITHUB_REF_NAME" = "feature/dev-ci" ]; then
+            export VERSION_GRS=2.1.9;
+          fi
+          echo "Version GRS -> ${VERSION_GRS}"
+          echo "VERSION_GRS=${VERSION_GRS}" >> "$GITHUB_ENV"
+
+          podman build \
+            --network=host \
+            --build-arg IMAGE_SOURCE="" \
+            --build-arg no_proxy=cnes.fr \
+            --file Dockerfile-github \
+            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}" \
+            --tag "${DOCKER_IMAGE_NAME}:latest"
+          echo "Build terminé"
+
+      - name: Publication des images sur Docker Hub
+        # TEMPORARY: autorise aussi feature/dev-ci (voir commentaire ci-dessus). A retirer ensuite.
+        if: github.ref_type == 'tag' || github.ref == 'refs/heads/feature/dev-ci'
+        run: |
+          echo "On se loggue à docker.io"
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
+              -u "${{ secrets.DOCKERHUB_LOGIN }}" \
+              --password-stdin
+
+          echo "Tag de l'image pour docker.io"
+          echo "podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
+
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
+          podman tag ${DOCKER_IMAGE_NAME}:latest docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
+
+          echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
+          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
+          echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:latest"
+          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
+          echo "Images publiées"
+
+
+# =============================================================================
+# quality
+# =============================================================================
+
+  lint:
+    if: github.event_name == 'pull_request' || github.ref_type == 'tag'
+    needs: podman-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name : Install ruff and mypi
+        run: pip install ruff mypy
+
+      - name: Run ruff
+        continue-on-error: true
+        run: ruff check . --output-format=json > ruff-report.json
+
+      - run: pip install -r requirements.txt
+
+      - name: Run mypy
+        continue-on-error: true
+        run: mypy . --junit-xml mypy-report.xml
+      
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            ruff-report.json
+            mypy-report.xml
+          retention-days: 1
+
+
+
+  # The "sync" job to GitLab has been moved to the dedicated workflow
+  # .github/workflows/gitlab-sync.yml: direct push is rejected on GitLab's
+  # protected main/develop branches (pre-receive hook), replaced by a
+  # PR -> GitLab branch -> GitLab Merge Request flow.
+
