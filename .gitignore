@@ -26,6 +26,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.vscode
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -49,6 +50,7 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
+tests/data/
 
 # Translations
 *.mo
@@ -181,3 +183,6 @@ fabric.properties
 
 # Android studio 3.1+ serialized cache file
 .idea/caches/build_file_checksums.ser
+
+#LUT
+grs/data/lut/gases

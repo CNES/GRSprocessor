@@ -1,0 +1,52 @@
+inputs:
+  safe: /home/flbray/projects/obs2co/data/S2A_MSIL1C_20230129T103301_N0510_R108_T31TFJ_20240810T202843.SAFE
+  cams: /home/flbray/projects/obs2co/data/2023-01-29-cams-global-atmospheric-composition-forecasts.nc
+  dem: /home/flbray/projects/obs2co/data/COP-DEM_GLO-30-DGED_31TFJ.tif
+  hypernets: /home/flbray/projects/obs2co/data/HYPERNETS_W_BEFR_L2A_REF_20230129T1031_20230319T0920_v1.2.nc
+  grsdata: /home/flbray/git/GRSprocessor/grs/data/lut/gases
+
+processing:
+  resolution: 20
+  scale_aot: 1
+  allpixels: false
+  snap_compliant: false
+
+expected:
+  epsg: 32631
+
+  variables:
+    - Rrs
+    - BRDFg
+    - aot550
+    - vza
+    - sza
+    - raa
+    - flags
+    - dem
+    - mask
+
+  dimensions:
+    wl: 11
+    x: 5490
+    y: 5490
+
+  wavelengths:
+    - 443
+    - 490
+    - 560
+    - 665
+    - 705
+    - 740
+    - 783
+    - 842
+    - 865
+    - 1610
+    - 2190
+
+validation:
+  hypernets:
+    spatial_window_pixels: 3
+
+    tolerance:
+      rtol: 0.20
+      atol: 0.002
