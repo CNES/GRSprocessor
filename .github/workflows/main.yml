@@ -136,12 +136,6 @@ jobs:
             echo "Tag : $GITHUB_REF_NAME"
             export VERSION_GRS=${GITHUB_REF_NAME};
           fi
-          # TEMPORARY: force la version 2.1.9 sur feature/dev-ci pour republier
-          # l'image cassée guillaumeeb/grs:2.1.9 (fix packaging grs.data.auxiliary)
-          # sans toucher au tag git v2.1.9. A retirer une fois l'image republiée.
-          if [ "$GITHUB_REF_NAME" = "feature/dev-ci" ]; then
-            export VERSION_GRS=2.1.9;
-          fi
           echo "Version GRS -> ${VERSION_GRS}"
           echo "VERSION_GRS=${VERSION_GRS}" >> "$GITHUB_ENV"
 
@@ -155,8 +149,7 @@ jobs:
           echo "Build terminé"
 
       - name: Publication des images sur Docker Hub
-        # TEMPORARY: autorise aussi feature/dev-ci (voir commentaire ci-dessus). A retirer ensuite.
-        if: github.ref_type == 'tag' || github.ref == 'refs/heads/feature/dev-ci'
+        if: github.ref_type == 'tag'
         run: |
           echo "On se loggue à docker.io"
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
