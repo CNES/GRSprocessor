@@ -136,12 +136,6 @@ jobs:
             echo "Tag : $GITHUB_REF_NAME"
             export VERSION_GRS=${GITHUB_REF_NAME};
           fi
-          # TEMPORARY: force la version 2.1.9 sur feature/dev-ci pour republier
-          # l'image cassée guillaumeeb/grs:2.1.9 (fix packaging grs.data.auxiliary)
-          # sans toucher au tag git v2.1.9. A retirer une fois l'image republiée.
-          if [ "$GITHUB_REF_NAME" = "feature/dev-ci" ]; then
-            export VERSION_GRS=2.1.9;
-          fi
           echo "Version GRS -> ${VERSION_GRS}"
           echo "VERSION_GRS=${VERSION_GRS}" >> "$GITHUB_ENV"
 
@@ -150,30 +144,36 @@ jobs:
             --build-arg IMAGE_SOURCE="" \
             --build-arg no_proxy=cnes.fr \
             --file Dockerfile-github \
-            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}" \
-            --tag "${DOCKER_IMAGE_NAME}:latest"
+            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
           echo "Build terminé"
 
-      - name: Publication des images sur Docker Hub
-        # TEMPORARY: autorise aussi feature/dev-ci (voir commentaire ci-dessus). A retirer ensuite.
-        if: github.ref_type == 'tag' || github.ref == 'refs/heads/feature/dev-ci'
+      - name: Publication sur Docker Hub — tag de version + latest (release)
+        if: github.ref_type == 'tag'
         run: |
           echo "On se loggue à docker.io"
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
               -u "${{ secrets.DOCKERHUB_LOGIN }}" \
               --password-stdin
 
-          echo "Tag de l'image pour docker.io"
-          echo "podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
-
           podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
-          podman tag ${DOCKER_IMAGE_NAME}:latest docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
 
           echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
           podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
           echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:latest"
           podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
-          echo "Images publiées"
+
+      - name: Publication sur Docker Hub — dev (develop)
+        if: github.event_name == 'push' && github.ref_name == 'develop'
+        run: |
+          echo "On se loggue à docker.io"
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
+              -u "${{ secrets.DOCKERHUB_LOGIN }}" \
+              --password-stdin
+
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
+          echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:dev"
+          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
 
 
 # =============================================================================
