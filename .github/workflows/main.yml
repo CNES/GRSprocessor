@@ -144,11 +144,10 @@ jobs:
             --build-arg IMAGE_SOURCE="" \
             --build-arg no_proxy=cnes.fr \
             --file Dockerfile-github \
-            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}" \
-            --tag "${DOCKER_IMAGE_NAME}:latest"
+            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
           echo "Build terminé"
 
-      - name: Publication des images sur Docker Hub
+      - name: Publication sur Docker Hub — tag de version + latest (release)
         if: github.ref_type == 'tag'
         run: |
           echo "On se loggue à docker.io"
@@ -156,17 +155,25 @@ jobs:
               -u "${{ secrets.DOCKERHUB_LOGIN }}" \
               --password-stdin
 
-          echo "Tag de l'image pour docker.io"
-          echo "podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
-
           podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
-          podman tag ${DOCKER_IMAGE_NAME}:latest docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
 
           echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
           podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
           echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:latest"
           podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
-          echo "Images publiées"
+
+      - name: Publication sur Docker Hub — dev (develop)
+        if: github.event_name == 'push' && github.ref_name == 'develop'
+        run: |
+          echo "On se loggue à docker.io"
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
+              -u "${{ secrets.DOCKERHUB_LOGIN }}" \
+              --password-stdin
+
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
+          echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:dev"
+          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
 
 
 # =============================================================================
