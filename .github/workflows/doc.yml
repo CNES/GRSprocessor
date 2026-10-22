@@ -3,10 +3,6 @@ name: Pipeline documentation
 on:
   push:
     branches:
-      - 'feature/*'
-      - 'release/*'
-      - 'hotfix/*'
-      - 'bugfix/*'
       - main
       - develop
     tags:
