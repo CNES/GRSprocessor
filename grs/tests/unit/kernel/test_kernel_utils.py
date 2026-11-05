@@ -160,31 +160,19 @@ class TestAotRefCandidates:
     def test_relative_threshold(self):
         aot_refs = np.array([1.0, 3.0, 5.0, 10.0])
         counts = np.array([0, 1, 2, 4])
-        previous_max = 4.0
         rel_thresh = 0.5
 
-        res = _aot_ref_candidates(aot_refs, counts, previous_max, rel_thresh)
+        res = _aot_ref_candidates(aot_refs, counts, rel_thresh)
 
         np.testing.assert_array_equal(res, np.array([1.0, 3.0]))
 
     def test_values_with_NaN(self):
         aot_refs = np.array([1.0,np.nan,-4.0,10.0])
         counts = np.array([0,0,2,0])
-        previous_max = 2.0
         rel_thresh = 1
         
-        res = _aot_ref_candidates(aot_refs, counts, previous_max, rel_thresh)
+        res = _aot_ref_candidates(aot_refs, counts, rel_thresh)
         np.testing.assert_array_equal(res, np.array([1.0, np.nan, 10.0]))
-
-    def test_uses_previous_max(self):
-        aot_refs = np.array([1.0, 3.0, 5.0])
-        counts = np.array([0, 1, 2])
-        previous_max = 10.0
-        rel_thresh = 0.5
-
-        res = _aot_ref_candidates(aot_refs, counts, previous_max, rel_thresh)
-
-        np.testing.assert_array_equal(res, np.array([1.0, 3.0, 5.0]))
 
 # ============================================================
 # Tests _cached

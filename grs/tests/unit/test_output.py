@@ -304,6 +304,7 @@ class TestBaseEncoding:
             "vza",
             "raa",
             "sza",
+            "wind",
             "flags",
             "mask",
         }

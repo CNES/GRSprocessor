@@ -9,17 +9,11 @@ import pandas as pd
 import re
 
 from grs.mask import Settings, _Tile, Masking, _Step
-from grs.mask import _set, _chunks, _s2_detector, _make_block_fn
+from grs.mask import _set, _chunks, _make_block_fn
 
 # ============================================================
 # Fixtures and Helpers
 # ============================================================
-
-@pytest.fixture(autouse=True)
-def clear_s2_detector_cache():
-    _s2_detector.cache_clear()
-    yield
-    _s2_detector.cache_clear()
 
 @pytest.fixture
 def masking():
@@ -150,50 +144,6 @@ def test_set(flags, bit, cond, expected):
 def test_chunks(n, size, minimum, expected):
     assert _chunks(n,size,minimum) == expected
 
-# ============================================================
-# Tests _s2_detector
-# ============================================================
-
-class TestS2Detector:
-    
-    def test_creation(self):
-        with patch(
-            "s2cloudless.S2PixelCloudDetector"
-        ) as mock_detector:
-            _s2_detector(
-                threshold=0.6,
-                average_over=0.2,
-                dilation_size=0.3
-            )
-            mock_detector.assert_called_once_with(
-                threshold=0.6,
-                average_over=0.2,
-                dilation_size=0.3,
-                all_bands=True
-            )
-            
-    def test_is_cached(self):
-        with patch(
-            "s2cloudless.S2PixelCloudDetector"
-        ) as mock_detector:
-
-            first = _s2_detector(0.6, 1, 12)
-            second = _s2_detector(0.6, 1, 12)
-
-            assert first is second
-
-            mock_detector.assert_called_once()
-
-    def test_use_different_cache_entries(self):
-        with patch(
-                "s2cloudless.S2PixelCloudDetector"
-        ) as mock_detector:
-
-            first = _s2_detector(0.6, 1, 12)
-            second = _s2_detector(0.8, 1, 12)
-
-            assert mock_detector.call_count == 2
-        
 # ============================================================
 #  _make_block_fn
 # ============================================================
@@ -550,7 +500,6 @@ def test_process_outputs(
     masking = masking
 
     monkeypatch.setattr(masking, "_nodata_step", lambda: "nodata")
-    monkeypatch.setattr(masking, "_s2cloudless_step", lambda: "cloud")
     monkeypatch.setattr(masking, "_water_step", lambda: "water")
     monkeypatch.setattr(masking, "_high_swir_step", lambda: "swir")
     monkeypatch.setattr(masking, "_surfwater_step", lambda: "surfwater")
