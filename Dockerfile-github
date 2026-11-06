@@ -64,6 +64,7 @@ RUN if [ -f "/kaniko/run/secrets/http_proxy" ]; then export http_proxy=$(cat /ka
         python3-lxml \
         python3-xmltodict \
         gdal-bin \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
   
 # get GRS from systemdependencies

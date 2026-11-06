@@ -83,6 +83,7 @@ RUN --mount=type=secret,id=http_proxy --mount=type=secret,id=https_proxy \
         python3-lxml \
         python3-xmltodict \
         gdal-bin \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
   
 # Récupération de GRS depuis systemdependencies

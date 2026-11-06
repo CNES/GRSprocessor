@@ -36,39 +36,39 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Installation du paquet gdal
+      - name: Install the gdal package
         run: |
           sudo apt-get update
           sudo apt-get install -y gdal-bin libgdal-dev
 
-      - name: Installation dépendances et lancement des tests
+      - name: Install dependencies and run tests
         run: |
-          echo "Création de l'environnement python"
+          echo "Creating the python environment"
           python -m venv python_env
           . python_env/bin/activate
           python -m pip install --upgrade pip
           GDAL_VERSION=$(gdal-config --version)
           echo "GDAL system version: $GDAL_VERSION"
 
-          echo "Installation des dépendances via pip"
+          echo "Installing dependencies via pip"
           python -m pip install GDAL==$GDAL_VERSION
           python -m pip install -r requirements.txt --no-cache-dir --force-reinstall
           python -m pip install pytest pytest-cov
-          python -m pip install -U datashader # la version du requirements.txt n'est plus compatible avec dask
-                           
-          echo "Lancement des tests du répertoire  grs/tests/integration_tests/"
+          python -m pip install -U datashader # requirements.txt's version is no longer compatible with dask
+
+          echo "Running tests in grs/tests/integration_tests/"
           python -m pytest --tb=short -vv -s -x grs/tests/integration_tests/ --cov=grs --cov-report=html:cov_html --cov-report=xml:coverage.xml --junitxml=test-results.xml
-          
+
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            echo "Génération du badge coverage"
+            echo "Generating the coverage badge"
             python -m pip install genbadge[coverage]
 
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-            # Le checkout d'un tag laisse le dépôt en detached HEAD : on ne peut
-            # pas y "git push" directement. On bascule donc sur main (branche
-            # depuis laquelle les tags sont coupés) avant de committer le badge.
+            # Checking out a tag leaves the repo in detached HEAD: we can't
+            # "git push" directly from there. So we switch to main (the branch
+            # tags are cut from) before committing the badge.
             git fetch origin main
             git checkout -B main origin/main
 
@@ -86,17 +86,17 @@ jobs:
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: false
-        #if: always()   # Upload même si les tests échouent
+        #if: always()   # Upload even if tests fail
         with:
           name: test-reports
-          path : | 
+          path : |
             coverage.xml
             test-results.xml
             cov_html/
           retention-days: 1
 
 # =============================================================================
-# package — Publication sur Pypi
+# package — Publish to PyPI
 # =============================================================================
   pypi:
     needs: python-tests
@@ -115,13 +115,13 @@ jobs:
           pip install build
           python -m build
 
-      - name: Publication sur Pypi
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_TOKEN }}
 
 # =============================================================================
-# package — Build & Publication sur Docker Hub
+# package — Build & Publish to Docker Hub
 # =============================================================================
   podman-build:
     needs: python-tests
@@ -136,12 +136,6 @@ jobs:
             echo "Tag : $GITHUB_REF_NAME"
             export VERSION_GRS=${GITHUB_REF_NAME};
           fi
-          # TEMPORARY: force la version 2.1.9 sur feature/dev-ci pour republier
-          # l'image cassée guillaumeeb/grs:2.1.9 (fix packaging grs.data.auxiliary)
-          # sans toucher au tag git v2.1.9. A retirer une fois l'image republiée.
-          if [ "$GITHUB_REF_NAME" = "feature/dev-ci" ]; then
-            export VERSION_GRS=2.1.9;
-          fi
           echo "Version GRS -> ${VERSION_GRS}"
           echo "VERSION_GRS=${VERSION_GRS}" >> "$GITHUB_ENV"
 
@@ -150,30 +144,48 @@ jobs:
             --build-arg IMAGE_SOURCE="" \
             --build-arg no_proxy=cnes.fr \
             --file Dockerfile-github \
-            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}" \
-            --tag "${DOCKER_IMAGE_NAME}:latest"
-          echo "Build terminé"
+            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
+          echo "Build complete"
 
-      - name: Publication des images sur Docker Hub
-        # TEMPORARY: autorise aussi feature/dev-ci (voir commentaire ci-dessus). A retirer ensuite.
-        if: github.ref_type == 'tag' || github.ref == 'refs/heads/feature/dev-ci'
+      - name: Publish version tag + latest to Docker Hub (release)
+        if: github.ref_type == 'tag'
         run: |
-          echo "On se loggue à docker.io"
+          echo "Logging in to docker.io"
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
               -u "${{ secrets.DOCKERHUB_LOGIN }}" \
               --password-stdin
 
-          echo "Tag de l'image pour docker.io"
-          echo "podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
-
           podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
-          podman tag ${DOCKER_IMAGE_NAME}:latest docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
 
-          echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
+          echo "Publishing ${DOCKER_IMAGE_NAME}:${VERSION_GRS} to docker.io"
           podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
-          echo "Publication vers docker.io de ${DOCKER_IMAGE_NAME}:latest"
+          echo "Publishing ${DOCKER_IMAGE_NAME}:latest to docker.io"
           podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
-          echo "Images publiées"
+
+      - name: Publish dev image to Docker Hub (develop)
+        if: github.event_name == 'push' && github.ref_name == 'develop'
+        run: |
+          echo "Logging in to docker.io"
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
+              -u "${{ secrets.DOCKERHUB_LOGIN }}" \
+              --password-stdin
+
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
+          echo "Publishing ${DOCKER_IMAGE_NAME}:dev to docker.io"
+          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
+
+      - name: Publish dev image to Docker Hub (hotfix)
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'hotfix/')
+        run: |
+          echo "Logging in to docker.io"
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | podman login docker.io \
+              -u "${{ secrets.DOCKERHUB_LOGIN }}" \
+              --password-stdin
+
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
+          echo "Publishing ${DOCKER_IMAGE_NAME}:dev to docker.io"
+          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:dev
 
 
 # =============================================================================
@@ -191,7 +203,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name : Install ruff and mypi
+      - name : Install ruff and mypy
         run: pip install ruff mypy
 
       - name: Run ruff
@@ -203,7 +215,7 @@ jobs:
       - name: Run mypy
         continue-on-error: true
         run: mypy . --junit-xml mypy-report.xml
-      
+
       - name: Upload reports
         uses: actions/upload-artifact@v4
         with:

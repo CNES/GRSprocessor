@@ -224,8 +224,10 @@ GitLab instance for HPC-based validation. Two independent pipelines run on every
    and commits the coverage badge.
 2. `pypi` (tags only, needs `python-tests`) — builds the sdist/wheel and publishes it to
    PyPI.
-3. `podman-build` (needs `python-tests`) — builds the Docker image (`Dockerfile-github`);
-   on a tag, it also pushes `guillaumeeb/grs:<tag>` and `:latest` to Docker Hub.
+3. `podman-build` (needs `python-tests`) — builds the Docker image (`Dockerfile-github`).
+   On a tag, it pushes `guillaumeeb/grs:<tag>` and `:latest` to Docker Hub (so `latest`
+   always tracks the most recent release). On a push to `develop`, it pushes
+   `guillaumeeb/grs:dev` instead, for testing unreleased changes.
 4. `lint` (pull requests and tags, needs `podman-build`) — runs `ruff` and `mypy` and
    uploads their reports as artifacts (non-blocking).
 5. `sync` (needs `podman-build`) — strips Git-LFS pointer files from the whole history with
