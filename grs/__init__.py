@@ -120,10 +120,13 @@ Version history
 2.2.0:
     - version with CI for CNES operation
 
+2.2.1:
+    - fix import of s2cloudless dependency
+
 '''
 
 __package__ = 'grs'
-__version__ = '2.2.0'
+__version__ = '2.2.1'
 
 
 from .acutils import Aerosol, Misc, Rasterization
