@@ -110,7 +110,10 @@ python-init:
     paths:
       - jfrog
       - uuid.txt
-      - python_env/
+      # not python_env/: nothing downstream uses it (python-tests explicitly excludes it when
+      # rsyncing to the CNES cluster, which has its own env; the only job that sourced it is
+      # disabled below) and omnicloudmask's torch/CUDA stack made it too large for a GitLab
+      # artifact ("413 Request Entity Too Large").
     reports:
       dotenv: build.env
     expire_in: 1 day
