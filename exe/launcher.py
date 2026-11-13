@@ -4,8 +4,9 @@ limit_malloc_arenas()
 
 from grs import class_logger
 from grs import __version__
-from grs.grs_process import Process
-from grs.run import s2_cloud_cover
+from grs.grs_process import Process, no_water_marker
+from grs.grs_exceptions import GRS_IO_Exception
+from grs.run import s2_cloud_cover, EXIT_OK, EXIT_ERROR, EXIT_INPUT, EXIT_SKIPPED
 from pathlib import Path
 import yaml
 import sys
@@ -19,6 +20,25 @@ misc = misc()
 
 
 def main():
+    '''
+    Process the image of the configuration files (see `_main`) and close the log files whatever the outcome;
+    returns the exit status (``grs.run.EXIT_*``).
+    '''
+    try:
+        return _main()
+    finally:
+        # Close logger and get stats (if it was set up)
+        logger = getattr(class_logger.THIS, 'klass', None)
+        if logger is not None:
+            logger.close()
+
+
+def _main():
+    '''
+    Process the image of the configuration files; returns the exit status (``grs.run.EXIT_*``): 0 product written
+    (or already there with noclobber), 1 processing error, 2 missing or unreadable input, 3 image skipped on
+    purpose (cloud cover, no water): no product.
+    '''
     # read config and prepare environment
     if len(sys.argv) > 1:
         config_file = sys.argv[1]
@@ -49,10 +69,10 @@ def main():
 
     if not file.exists():
         logging.error("Missing input file. Process stopped")
-        exit(-1)
+        return EXIT_INPUT
     if not data["cams_folder"]:
         logging.error("Missing CAMS folder. Process stopped")
-        exit(-1)
+        return EXIT_INPUT
 
     input_filename = file.name
 
@@ -75,16 +95,16 @@ def main():
 
     # Verify existence of inputs
     if not file.is_dir():
-        logging.error("Input file doesn't exit. Process stopped")
-        exit(-1)
+        logging.error("Input file doesn't exist. Process stopped")
+        return EXIT_INPUT
 
     if not cams_file.is_file():
-        logging.error("CAMS file doesn't exit. Process stopped")
-        exit(-1)
+        logging.error("CAMS file doesn't exist. Process stopped")
+        return EXIT_INPUT
 
     if data["surfwater_file"] and not Path(data["surfwater_file"]).is_file():
-        logging.error("SurfWater file doesn't exit. Process stopped")
-        exit(-1)
+        logging.error("SurfWater file doesn't exist. Process stopped")
+        return EXIT_INPUT
 
     # prepare outfile
     suffix = data["suffix"]
@@ -96,12 +116,15 @@ def main():
     outdir = misc.set_ofile(input_filename, odir=output_dir, level_name='L2AGRS', suffix=suffix)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    outfile = Path(outdir,  f"{outdir.name}.nc")
-
-    # skip if already processed
-    if Path(outfile).is_file() & data["noclobber"]:
-        logging.info(f'File {outfile} already processed; skip!')
-        exit(-1)
+    # skip if already processed (Zarr store, the default, or NetCDF file), or already found without water
+    if data["noclobber"]:
+        for outfile in (Path(outdir, f"{outdir.name}.zarr"), Path(outdir, f"{outdir.name}.nc")):
+            if outfile.exists():
+                logging.info(f'File {outfile} already processed; skip!')
+                return EXIT_OK
+        if no_water_marker(outdir).exists():
+            logging.info(f'File {no_water_marker(outdir)} found (image without water); skip!')
+            return EXIT_SKIPPED
 
     logging.info(f'call grs_process for the following parameters. '
                  f'File: {file} , '
@@ -118,7 +141,7 @@ def main():
         cc = s2_cloud_cover(file)
         if cc >= max_cc:
             logging.info('input file not processed since cloud cover {:.3f} is greater than {:.3f}'.format(cc, max_cc))
-            return
+            return EXIT_SKIPPED
 
     try:
         process_ = Process()
@@ -132,7 +155,9 @@ def main():
                          allpixels=data["allpixels"],
                          surfwater_file=data["surfwater_file"],
                          snap_compliant=data["snap_compliant"])
+        # for an image without water: marker file <outdir>/<name>_no_water.txt instead of the product
         process_.write_output()
+        return EXIT_SKIPPED if getattr(process_, 'no_water', False) else EXIT_OK
 
     except Exception as inst:
         logging.error('-------------------------------')
@@ -140,11 +165,8 @@ def main():
         logging.error(message)
         logging.error('-------------------------------')
         logging.error('error during grs', exc_info=True)
-
-    finally:
-        # Close logger and get stats
-        class_logger.get_instance().close()
+        return EXIT_INPUT if isinstance(inst, GRS_IO_Exception) else EXIT_ERROR
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

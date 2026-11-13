@@ -147,6 +147,16 @@ the aerosol optical thickness, the flags and the mask of the valid water pixels,
 | `--no_clobber` | skip the images already processed |
 | `--snap_compliant` | one variable per band, for ESA SNAP |
 
+Exit status of `grs` (and of `exe/launcher.py`), for the processing chains: only 0 gives a product for
+the next steps (e.g. Level-2B).
+
+| status | |
+|---|---|
+| 0 | L2A product written (or, with `--no_clobber`, already there) |
+| 1 | processing error (traceback in `log_file.log` and `error.log`) |
+| 2 | invalid arguments, missing or unreadable input (Level-1, CAMS, SURFWATER, LUT) |
+| 3 | image skipped on purpose, no product: cloud cover above `--max_cloud_cover`, or not enough water (marker file `<name>_no_water.txt`) |
+
 From Python:
 
 ```python
