@@ -61,6 +61,8 @@ docs = [
     "linkify-it-py",
     "ipython",
 ]
+# inputs and outputs on S3-compatible object storage and web servers (grs.remote; s3fs brings aiohttp for https)
+remote = ["s3fs"]
 # packages of the example notebooks (CAMS download, maps, interactive viewer)
 notebooks = ["cartopy", "grstbx"]
 

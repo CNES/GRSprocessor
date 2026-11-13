@@ -38,7 +38,8 @@ def test_no_water_marker_names():
     assert str(no_water_marker('/data/scene.nc')) == '/data/scene_no_water.txt'
     # directory of the grs command: <dir>/<name>_no_water.txt
     assert str(no_water_marker('/data/scene/')) == '/data/scene/scene_no_water.txt'
-    assert no_water_marker('s3://bucket/scene.zarr') is None
+    # remote output: the marker is written next to the store (URL)
+    assert no_water_marker('s3://bucket/scene.zarr') == 's3://bucket/scene_no_water.txt'
 
 
 def test_write_output_writes_marker(tmp_path):

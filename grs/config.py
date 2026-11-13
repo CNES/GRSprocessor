@@ -4,8 +4,9 @@ Configuration of GRS: settings, folder of the look-up tables (LUTs) and their do
 The settings are read from, in increasing order of priority:
 
 1. the default configuration shipped with the package (``grs/config.yml``),
-2. the user configuration file: the file given by the ``GRS_CONFIG`` environment variable or, if not
-   set, ``$XDG_CONFIG_HOME/grs/config.yml`` (``~/.config/grs/config.yml`` by default),
+2. the user configuration file: the file given by the ``GRS_CONFIG`` environment variable (a local path or a
+   URL, e.g. ``https://`` on a Git server or ``s3://`` on an object storage) or, if not set,
+   ``$XDG_CONFIG_HOME/grs/config.yml`` (``~/.config/grs/config.yml`` by default),
 3. the ``GRS_DATA_ROOT`` environment variable, which overrides ``path: grsdata``.
 
 If ``grsdata`` is not set (``null``), the LUTs are read from the default folder of the user data,
@@ -39,6 +40,8 @@ from pathlib import Path
 import platformdirs
 import yaml
 
+from . import remote
+
 # keys of `path` giving the LUT file names, with their short name
 LUT_KEYS = {'toa': 'toa_lut', 'transmittance': 'trans_lut'}
 
@@ -58,8 +61,13 @@ def default_config_file():
 
 
 def user_config_file():
-    '''Return the path of the user configuration file (which may not exist).'''
+    '''
+    Return the path of the user configuration file (which may not exist): a ``Path``, or the URL given by
+    ``GRS_CONFIG`` (``https://`` e.g. a raw file of a Git server, ``s3://``..., see :mod:`grs.remote`).
+    '''
     if os.environ.get('GRS_CONFIG'):
+        if remote.is_url(os.environ['GRS_CONFIG']):
+            return os.environ['GRS_CONFIG']
         return Path(os.environ['GRS_CONFIG']).expanduser()
     config_home = os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config'
     return Path(config_home) / 'grs' / 'config.yml'
@@ -69,9 +77,14 @@ def read_user_config():
     '''
     Return the settings of the user configuration file, ``{}`` if there is none.
 
-    :raises FileNotFoundError: if ``GRS_CONFIG`` points to a missing file
+    :raises FileNotFoundError: if ``GRS_CONFIG`` points to a missing file (or URL)
     '''
     user_file = user_config_file()
+    if remote.is_url(user_file):
+        try:
+            return yaml.safe_load(remote.read_text(user_file)) or {}
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f'GRS_CONFIG points to a missing file: {user_file}') from exc
     if user_file.is_file():
         with open(user_file, 'r', encoding='utf-8') as file:
             return yaml.safe_load(file) or {}
@@ -202,6 +215,8 @@ def init_user_config(data_root=None, force=False):
     :raises FileExistsError: if the file exists and `force` is False
     '''
     user_file = user_config_file()
+    if remote.is_url(user_file):
+        raise ValueError(f'GRS_CONFIG is a URL ({user_file}): write the configuration file there yourself')
     if user_file.exists() and not force:
         raise FileExistsError(f'{user_file} already exists (use --force to overwrite it)')
 
@@ -319,7 +334,7 @@ def main(argv=None):
     if args.init is not None:
         try:
             user_file = init_user_config(args.init or None, force=args.force)
-        except FileExistsError as error:
+        except (FileExistsError, ValueError) as error:
             print(f'error: {error}', file=sys.stderr)
             return 1
         print(f'user configuration written: {user_file}')
@@ -335,7 +350,7 @@ def main(argv=None):
 
     user_file = user_config_file()
     print(f'default configuration: {default_config_file()}')
-    print(f'user configuration:    {user_file} ({"found" if user_file.is_file() else "not found"})')
+    print(f'user configuration:    {user_file} ({"found" if remote.exists(user_file) else "not found"})')
     print(f'LUT folder:            {load_config()["path"]["grsdata"]} ({data_root_source()})')
     print(f'automatic download:    {"on" if auto_download_enabled() else "off"} '
           '(missing LUTs downloaded before the first processing)')

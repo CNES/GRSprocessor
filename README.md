@@ -147,6 +147,22 @@ the aerosol optical thickness, the flags and the mask of the valid water pixels,
 | `--no_clobber` | skip the images already processed |
 | `--snap_compliant` | one variable per band, for ESA SNAP |
 
+Inputs and outputs can be on an object storage (S3 or S3-compatible) or a web server: the Level-1 product,
+`--cams_file`, `--dem_file`, `--surfwater` and `--odir` accept URLs (`s3://`, `https://`...), and so does the
+`GRS_CONFIG` configuration file (e.g. a raw file on a Git server). The credentials and the endpoint of the
+bucket are those of the AWS environment (`AWS_PROFILE`, `AWS_ENDPOINT_URL`...):
+
+```bash
+export AWS_PROFILE=my-profile AWS_ENDPOINT_URL=https://s3.example.org
+grs s3://bucket/l1c/S2B_MSIL1C_..._.SAFE --cams_file s3://bucket/cams/cams_forecast_2022-07.nc \
+    --odir s3://bucket/l2a --resolution 20
+```
+
+Install the S3 / HTTPS drivers with `pip install GRSprocessor[remote]` (s3fs). The Level-1 bands are read in place
+by GRSdriver (version with remote reading, `GRSdriver.remote`), the other
+input files are copied once into a local cache (`GRS_CACHE_DIR`), the Zarr store is written directly to the
+bucket, and the log files are written locally (`--log_dir`) then copied next to the product.
+
 Exit status of `grs` (and of `exe/launcher.py`), for the processing chains: only 0 gives a product for
 the next steps (e.g. Level-2B).
 
