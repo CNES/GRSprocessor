@@ -31,6 +31,8 @@ Dates are given for tagged releases only.
   release/hotfix/bugfix branches, documentation published on tags; `notebooks` extra in `pyproject.toml`.
 
 ### Changed
+- Requires GRSdriver >= 2.1 (was 2.0.4), the first version reading the Level-1 products in place from a bucket
+  (`GRSdriver.remote`), used by the URL inputs above.
 - `grs`: `error.log` is written next to `log_file.log` in the output folder (was the current folder, where
   the runs started from the same folder overwrote each other's error log).
 - Faster processing, same products (bit-identical L2A on a Sentinel-2 tile; `execute` about 295 s ->
