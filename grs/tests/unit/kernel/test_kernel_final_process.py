@@ -720,7 +720,6 @@ class TestGlintPropagation:
         result = kernel.final_process_chunk(raster, kernel.test_aot_ref_raster)
         np.testing.assert_allclose(result['Rrs'].values, 0., atol=1e-7)
 
-    @pytest.mark.xfail(strict=True, reason='monoview (Landsat): the glint is divided by sunglint_eps twice')
     def test_monoview_glint_removed(self, kernel_final_process):
         kernel = kernel_final_process
         raster = self._glint_scene(kernel, monoview=True)

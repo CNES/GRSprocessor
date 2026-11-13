@@ -361,3 +361,20 @@ class TestGlintHybrid:
         # sum defined up to 0.2 only: (t - 0.1) + (t - 0.3) crosses at 0.2
         assert np.isclose(tau, 0.2)
 
+
+# ============================================================
+# Sunglint propagation (mono-view sensor, e.g. Landsat)
+# ============================================================
+
+class TestGlintPropagationMonoview:
+
+    def test_glint_only_scene_removed(self, kernel_visible):
+        """TOA reflectance made of sunglint only: at aot_ref = 0 (no diffuse light, the same direct transmittance in
+        all the bands) the glint estimated in the SWIR and propagated with sunglint_eps removes the whole signal"""
+        kernel = kernel_visible
+        eps = np.array([1.70, 1.66, 1.60, 1.53, 1.51, 1.50, 1.49, 1.48, 1.38], dtype=np.float32)
+        kernel.sunglint_eps[:] = eps
+        raster = kernel.test_raster.copy(deep=True)
+        raster["bands"][:] = (0.08 * eps)[:, None, None]
+        kernel.aerosol_visible_chunk(raster, keep_xres=True)
+        np.testing.assert_allclose(kernel.xres.Rrs.isel(aot_ref=0).values, 0., atol=1e-7)
