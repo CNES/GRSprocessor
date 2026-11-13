@@ -60,6 +60,12 @@ Dates are given for tagged releases only.
   first NaN) instead of the smallest valid cost, giving a NaN cost and a wrong wind on the pixels where
   only some wind candidates have a valid cost.
 - Configuration tests no longer read the user file of the computer (`~/.config/grs/config.yml`).
+- Exit status of `grs` and of `exe/launcher.py` (issue #13): a processing error ended with status 0, so that the
+  processing chains went on to the Level-2B with no Level-2A product. The status is now 0 when the product is
+  written (or already there with `--no_clobber`), 1 for a processing error, 2 for invalid arguments or a missing /
+  unreadable input (was -1, i.e. 255), 3 for an image skipped on purpose without product (cloud cover, no water,
+  was 0). `grs.run.main` returns it (`argv` argument for tests) and closes its log files; the `--no_clobber` check of
+  the launcher also finds the Zarr products and the no-water marker.
 
 ## [3.1.0]
 

@@ -45,6 +45,14 @@ Options:
   For CNES datalake:
       grs /work/datalake/S2-L1C/31TFJ/2023/06/16/S2B_MSIL1C_20230616T103629_N0509_R008_T31TFJ_20230616T111826.SAFE --cams_file /work/datalake/watcal/ECMWF/CAMS/2023/06/16/2023-06-16-cams-global-atmospheric-composition-forecasts.nc --odir /work/datalake/watcal/test --resolution 20 --dem_file /work/datalake/static_aux/MNT/COP-DEM_GLO-30-DGED_S2_tiles/COP-DEM_GLO-30-DGED_31TFJ.tif
 
+Exit status:
+  0  the L2A product is written (or, with --no_clobber, already exists)
+  1  processing error (traceback in the log files)
+  2  invalid arguments, missing or unreadable input file (Level-1, CAMS, SURFWATER, LUT)
+  3  image skipped on purpose, no product: cloud cover above --max_cloud_cover, or not enough water
+     (marker file <name>_no_water.txt written or, with --no_clobber, already there)
+  Only exit status 0 gives a product for the next steps of a processing chain (e.g. Level-2B).
+
 '''
 
 import ctypes
@@ -52,11 +60,18 @@ import ctypes.util
 import logging
 import os
 
+import sys
 from pathlib import Path
 from xml.etree import ElementTree
-from docopt import docopt
+from docopt import docopt, DocoptExit
 
 from . import __package__, __version__
+
+# exit status of the grs command (and of exe/launcher.py), see the Exit status section above
+EXIT_OK = 0         # product written (or already there with --no_clobber)
+EXIT_ERROR = 1      # processing error
+EXIT_INPUT = 2      # invalid arguments, missing or unreadable input
+EXIT_SKIPPED = 3    # skipped on purpose (cloud cover, no water): no product
 
 
 def set_ofile(filename: str, odir='', level_name='L2GRS', suffix='') -> Path:
@@ -98,17 +113,35 @@ def limit_malloc_arenas(n=2):
         pass
 
 
-def main():
+def main(argv=None):
+    '''
+    ``grs`` command: process one Level-1 image.
+
+    :param argv: command line arguments (default: ``sys.argv[1:]``)
+    :return: exit status, see the module constants ``EXIT_*`` (the console script passes it to ``sys.exit``)
+    '''
     # before any thread is started
     limit_malloc_arenas()
-    # -h / -v are handled (and exit) here, before the heavy imports below
-    args = docopt(__doc__, version=__package__ + '_' + __version__)
+    # -h / -v are handled (and exit with status 0) here, before the heavy imports below
+    try:
+        args = docopt(__doc__, argv=argv, version=__package__ + '_' + __version__)
+    except DocoptExit as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_INPUT
     print(args)
 
     from . import class_logger
     from .grs_process import Process, no_water_marker
+    from .grs_exceptions import GRS_IO_Exception
 
     file = Path(args['<input_file>'])
+    if not file.exists():
+        print(f'input file not found: {file}', file=sys.stderr)
+        return EXIT_INPUT
+    for name, path in (('CAMS', args['--cams_file']), ('SURFWATER', args['--surfwater']), ('DEM', args['--dem_file'])):
+        if path and not Path(path).exists():
+            print(f'{name} file not found: {path}', file=sys.stderr)
+            return EXIT_INPUT
 
     lev = args['--levname']
     cams_file = args['--cams_file']
@@ -135,7 +168,8 @@ def main():
         cc = s2_cloud_cover(file)
         if cc >= max_cc:
             logging.info('input file not processed since cloud cover {:.3f} is greater than {:.3f}'.format(cc, max_cc))
-            return
+            print(f'cloud cover {cc:.3f} greater than {max_cc:.3f}: image not processed', file=sys.stderr)
+            return EXIT_SKIPPED
 
     odir = args['--odir']
     if odir == './':
@@ -152,10 +186,12 @@ def main():
     # skip if already processed, or already found without water (marker file of Process.write_output);
     # checked before the logger is set up, which would overwrite the log file of the previous run
     if noclobber:
-        for done in (outfile, no_water_marker(outdir)):
-            if done.exists():
-                print(f'File {done} already processed; skip!')
-                exit(-1)
+        if outfile.exists():
+            print(f'File {outfile} already processed; skip!')
+            return EXIT_OK
+        if no_water_marker(outdir).exists():
+            print(f'File {no_water_marker(outdir)} found (image without water); skip!')
+            return EXIT_SKIPPED
 
     outdir.mkdir(parents=True, exist_ok=True)
     class_logger.ServiceLogger(log_file=str(Path(outdir, 'log_file.log')), error_log="error.log", log_level='INFO',
@@ -184,10 +220,19 @@ def main():
                          min_water_area=min_water_area)
         # for an image without water: marker file <outdir>/<name>_no_water.txt instead of the product
         process_.write_output()
+    except GRS_IO_Exception:
+        logging.error("Input error in grs_process", exc_info=True)
+        return EXIT_INPUT
     except Exception:
         logging.error("Fatal error in grs_process", exc_info=True)
-    return
+        return EXIT_ERROR
+    finally:
+        # log the run statistics and close the log files
+        class_logger.get_instance().close()
+    if getattr(process_, 'no_water', False):
+        return EXIT_SKIPPED
+    return EXIT_OK
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
