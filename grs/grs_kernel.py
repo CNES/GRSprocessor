@@ -1243,7 +1243,7 @@ class Kernel():
            \end{cases}
 
            R_g(\lambda) = T_g(\lambda)\, T_{dir}(\lambda)\, \varepsilon(\lambda)\, P_{slope}(\lambda)\,
-           \frac{R_f}{\varepsilon(\lambda_s)\, P_{slope}(\lambda_s)}
+           \frac{R_f}{\varepsilon(\lambda_r)\, P_{slope}(\lambda_r)}
 
         and the remote-sensing reflectance is
 
@@ -1260,16 +1260,9 @@ class Kernel():
 
         ``BRDFg`` is :math:`R_f` and ``aot550`` is :math:`\tau_{ref}`.
 
-        Note: :math:`R_f'` is normalised with :math:`\lambda_r` (last band) but :math:`R_g` with
-        :math:`\lambda_s`, so that (without clipping)
-
-        .. math::
-
-           R_g(\lambda_s) = R_{corr}(\lambda_s)\,
-           \frac{\varepsilon(\lambda_r)\, P_{slope}(\lambda_r)}{\varepsilon(\lambda_s)\, P_{slope}(\lambda_s)}
-
-        which differs from :math:`R_{corr}(\lambda_s)` unless the two products are equal
-        (`aerosol_visible_chunk` uses :math:`\lambda_r` for both).
+        so that (without clipping) the glint removed in the SWIR band is :math:`R_g(\lambda_s) = R_{corr}(\lambda_s)`,
+        as in `aerosol_visible_chunk` (multi-view sensors; for the monoview sensors :math:`R_f'` is already
+        divided by :math:`\varepsilon(\lambda_s)\, P_{slope}`, see the TODO in the code).
 
         The wind map ``self.wind_img`` is interpolated to the block; the coarse maps (surface pressure,
         gaseous transmittance, `aot_ref_raster`) are interpolated to the block grid. Nothing is stored on
@@ -1412,11 +1405,14 @@ class Kernel():
             Rf = _R_._multiplicate(sunglint_eps, Rf, arr_tmp)
             # slope probability of the reference band: (y, x) for monoview sensors, the same for all the bands
             # (indexing it would take a row of the block)
-            _p_slope_ref = _p_slope_ if monoview else _p_slope_[-2]
+            # multi-view: same normalisation as Rf above and as aerosol_visible_chunk (sunglint_eps[-1] * p_slope[-1])
+            # TODO monoview: Rf above is already divided by sunglint_eps[iwl], the division below is one too many
+            _p_slope_ref = _p_slope_ if monoview else _p_slope_[-1]
+            _eps_ref = sunglint_eps[-2] if monoview else sunglint_eps[-1]
             Rf = Rf * _Tg_raster
             Rf *= Tdir
             Rf *= _p_slope_
-            Rf /= (sunglint_eps[-2] * _p_slope_ref).astype(np.float32)
+            Rf /= (_eps_ref * _p_slope_ref).astype(np.float32)
             del Tdir, _p_slope_
 
             # sunglint removal

@@ -61,6 +61,13 @@ Dates are given for tagged releases only.
   and GRSdriver >= 2.0.4 (no EOReader, sertit, fiona). The processing code of 3.1.1 is kept.
 
 ### Fixed
+- Sunglint removal of the multi-view sensors (Sentinel-2), `Kernel.final_process_chunk`: the glint estimated
+  in the SWIR was normalised with `sunglint_eps` and `p_slope` of the last band (2190 nm) but propagated to
+  the other bands with those of the 1610 nm band, so that only ε(2190)/ε(1610) ≈ 0.89 of the glint was
+  removed in every band (regression of 3.0, 2.2.1 was consistent). On a glinted Sentinel-2 scene the
+  residual glint was ~3e-3 sr-1 at 1610 nm and ~2e-3 sr-1 in the green. Unit test on a glint-only scene
+  (Rrs = 0); the same test, expected to fail, documents the monoview sensors (Landsat), where the glint is
+  still divided by `sunglint_eps` twice.
 - Thread-safe numba threading layer by default (`NUMBA_THREADING_LAYER=threadsafe`: TBB, else OpenMP,
   unless set by the user): the fallback `workqueue` layer aborted the process on the concurrent calls of
   the numba kernels from the dask threads.

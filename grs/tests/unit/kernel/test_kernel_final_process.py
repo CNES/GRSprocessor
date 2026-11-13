@@ -679,3 +679,50 @@ class TestFinalProcess:
         )
 
         snapshot_factory.assert_called_once_with()
+
+# ============================================================
+# Sunglint propagation: a glint-only scene gives Rrs = 0
+# ============================================================
+
+class TestGlintPropagation:
+    """TOA reflectance made of sunglint only (no atmosphere, no water signal): the glint estimated in the
+    SWIR and propagated to the other bands must remove the whole signal, Rrs = 0 in every band."""
+
+    # spectral shape of the glint (Fresnel) and slope probability, both band dependent
+    EPS = np.array([1.70, 1.66, 1.60, 1.53, 1.51, 1.50, 1.49, 1.48, 1.38], dtype=np.float32)
+    PSLOPE = np.array([0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20], dtype=np.float32)
+    GLINT = 0.08
+
+    def _glint_scene(self, kernel, monoview):
+        kernel.monoview = monoview
+        kernel.rot[:] = 0.          # Tdir = 1
+        kernel.sunglint_eps[:] = self.EPS
+        raster = kernel.test_raster.copy(deep=True)
+        nwl = raster.sizes['wl']
+        if monoview:
+            raster['bands'][:] = (self.GLINT * self.EPS * self.PSLOPE[-1])[:, None, None]
+            pslope = lambda sza, vza, raa, sigma2=None, monoview=True: xr.full_like(sza, self.PSLOPE[-1])
+        else:
+            raster['bands'][:] = (self.GLINT * self.EPS * self.PSLOPE)[:, None, None]
+            # Sentinel-2: one viewing direction per band, the slope probability depends on the band
+            raster['vza'] = (('wl', 'y', 'x'), np.broadcast_to(np.arange(nwl, dtype=np.float32)[:, None, None],
+                                                                (nwl, 2, 2)).copy())
+            raster['raa'] = (('wl', 'y', 'x'), np.full((nwl, 2, 2), 30., dtype=np.float32))
+
+            def pslope(sza, vza, raa, sigma2=None, monoview=False):
+                return (xr.DataArray(self.PSLOPE, dims='wl') + vza * 0. + sza * 0.).transpose('wl', 'y', 'x')
+        kernel.p_slope = Mock(side_effect=pslope)
+        return raster
+
+    def test_multiview_glint_removed(self, kernel_final_process):
+        kernel = kernel_final_process
+        raster = self._glint_scene(kernel, monoview=False)
+        result = kernel.final_process_chunk(raster, kernel.test_aot_ref_raster)
+        np.testing.assert_allclose(result['Rrs'].values, 0., atol=1e-7)
+
+    @pytest.mark.xfail(strict=True, reason='monoview (Landsat): the glint is divided by sunglint_eps twice')
+    def test_monoview_glint_removed(self, kernel_final_process):
+        kernel = kernel_final_process
+        raster = self._glint_scene(kernel, monoview=True)
+        result = kernel.final_process_chunk(raster, kernel.test_aot_ref_raster)
+        np.testing.assert_allclose(result['Rrs'].values, 0., atol=1e-7)
