@@ -45,7 +45,7 @@ from .product import Product
 from .cams import CamsProduct
 from .output import L2aProduct, quicklook_coarsen, quicklook_factor, quicklook_rgb
 from .mask import Masking
-from .grs_kernel import Kernel
+from .grs_kernel import _zero_crossing, Kernel
 from .grs_exceptions import GRS_IO_Exception
 
 opj = os.path.join
@@ -209,6 +209,10 @@ AEROSOL_SETTINGS = ('aot_resolution', 'min_pixel_prop', 'aot_chunk', 'outlier_fa
                     'fine_step', 'fine_window', 'aot_step')
 
 
+# optional settings (default when missing in the configuration): hybrid estimator under sunglint
+AEROSOL_OPTIONAL_SETTINGS = {'glint_aot': False, 'glint_aot_min_glint': 0.02}
+
+
 def _aerosol_settings(**overrides):
     """
     Settings of the aerosol retrieval: ``aerosol`` section of the configuration, overridden by the arguments
@@ -219,8 +223,44 @@ def _aerosol_settings(**overrides):
     if missing:
         raise KeyError(f'aerosol settings missing in the configuration: {missing}')
     settings = {key: config.get(key) for key in AEROSOL_SETTINGS}
+    settings.update({key: config.get(key, default) for key, default in AEROSOL_OPTIONAL_SETTINGS.items()})
     settings.update({key: value for key, value in overrides.items() if value is not None})
     return settings
+
+
+def _glint_hybrid_aot(aot_ref_img, min_glint):
+    """
+    Hybrid AOT of the blocks under strong sunglint.
+
+    Under sunglint the retrieval of `Kernel.aerosol_visible_chunk` keeps the top of the admissible AOT window
+    and over-estimates the AOT. The scene glint-based AOT is the AOT at which the slope of the corrected
+    visible reflectance against the sunglint, pooled over the blocks under strong sunglint (block means
+    removed: sum of ``glint_sxy`` / sum of ``glint_sxx``), crosses zero. In these blocks it replaces
+    ``aot_ref``, clipped to the admissible window ``[aot_low, aot_ref]``; the other blocks keep ``aot_ref``.
+
+    :param aot_ref_img: merged block results of `Kernel.aerosol_visible_chunk`
+    :param min_glint: strong sunglint: block median ``glint_ref`` above this value
+    :return: (aot_ref_img with the hybrid ``aot_ref``, scene glint-based AOT or None)
+    """
+    if 'glint_sxy' not in aot_ref_img:
+        return aot_ref_img, None
+    strong = (aot_ref_img.glint_ref > min_glint) & (aot_ref_img.number_of_pixel > 0) & (aot_ref_img.glint_sxx > 0)
+    if not bool(strong.any()):
+        logging.info('glint-based AOT: no block under strong sunglint, retrieval unchanged')
+        return aot_ref_img, None
+    # NaN (outside the tested values of a block) where any block is NaN: the pooled slope uses all the blocks
+    block_sxy = aot_ref_img.glint_sxy.where(strong)
+    sxy = block_sxy.sum(['y', 'x']).where(block_sxy.notnull().sum(['y', 'x']) == int(strong.sum()))
+    slope = sxy / float(aot_ref_img.glint_sxx.where(strong).sum())
+    aot_glint = _zero_crossing(slope.aot_grid.values, slope.values)
+    if not np.isfinite(aot_glint):
+        logging.info('glint-based AOT: no crossing of the pooled slope (%d blocks), retrieval unchanged',
+                     int(strong.sum()))
+        return aot_ref_img, None
+    low = aot_ref_img.aot_low.fillna(0.)
+    hybrid = np.minimum(np.maximum(aot_glint, low), aot_ref_img.aot_ref)
+    logging.info('glint-based AOT %.3f, applied to %d blocks under strong sunglint', aot_glint, int(strong.sum()))
+    return aot_ref_img.assign(aot_ref=aot_ref_img.aot_ref.where(~strong, hybrid)), aot_glint
 
 
 class Process:
@@ -265,6 +305,8 @@ class Process:
                 fine_step=None,
                 fine_window=None,
                 aot_step=None,
+                glint_aot=None,
+                glint_aot_min_glint=None,
                 scale_aot=1,
                 opac_model=None,
                 allpixels=False,
@@ -316,6 +358,9 @@ class Process:
         :param fine_window: size (cells of this grid) of the NaN-mean window of this smoothing; None in the
             configuration: about one block (default)
         :param aot_step: AOT step of the look-up tables of the final processing (default 0.01)
+        :param glint_aot: hybrid AOT under strong sunglint (see `_glint_hybrid_aot`; default False)
+        :param glint_aot_min_glint: strong sunglint: median sunglint reflectance of the reference band of a block
+            above this value (default 0.02)
         :param scale_aot: scaling factor applied to CAMS aod550 raster
         :param opac_model: If set force OPAC aerosol model for LUT interpolation (taken from CAMS data otherwise)
         :param allpixels: if True process all pixels (no water and cloud masking); otherwise only the clear-sky
@@ -730,7 +775,8 @@ class Process:
         aerosol = _aerosol_settings(aot_resolution=aot_resolution, aot_chunk=aot_chunk,
                                     aot_smoothing_blocks=aot_smoothing_blocks, min_pixel_prop=min_pixel_prop,
                                     outlier_factor=outlier_factor, fine_step=fine_step, fine_window=fine_window,
-                                    aot_step=aot_step)
+                                    aot_step=aot_step, glint_aot=glint_aot,
+                                    glint_aot_min_glint=glint_aot_min_glint)
         logging.info('aerosol retrieval settings: %s', aerosol)
         aot_resolution, aot_chunk = aerosol['aot_resolution'], aerosol['aot_chunk']
 
@@ -765,6 +811,9 @@ class Process:
                 res.append(res_)
 
         kernel.aot_ref_img = xr.merge(res)
+        if aerosol['glint_aot']:
+            kernel.aot_ref_img, kernel.aot_glint = _glint_hybrid_aot(kernel.aot_ref_img,
+                                                                     aerosol['glint_aot_min_glint'])
         aot_ref_img = kernel.aot_ref_img
 
         logging.info('smoothing aerosol optical thickness raster')
