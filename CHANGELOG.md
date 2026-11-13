@@ -9,6 +9,13 @@ Dates are given for tagged releases only.
 ## [Unreleased] - 3.1.1
 
 ### Added
+- Inputs and outputs on object storage (S3 or S3-compatible) or web servers (issue #11): the Level-1 product, the
+  CAMS, DEM and SURFWATER files, the output (`--odir`, Zarr) and the configuration file (`GRS_CONFIG`) can be
+  URLs (`s3://`, `https://`...), in `Process.execute` (`storage_options` argument), the `grs` command and
+  `exe/launcher.py`. New module `grs.remote`: URL helpers on fsspec, credentials from the AWS environment; the
+  Level-1 bands are read in place by GRSdriver (needs its remote reading, `GRSdriver.remote`), the other input
+  files are copied once into a local cache (`GRS_CACHE_DIR`). The no-water marker is also written for a remote
+  output. `grs --log_dir`: local folder of the log files, copied next to a remote product at the end.
 - Images without water are not processed: `Process.execute` stops right after reading the image (no CAMS,
   cloud mask, LUTs nor aerosol retrieval) when the water test of the processing finds less water than
   `min_water_area` (km², `settings: min_water_area` of the configuration, default 1 km²; argument of
@@ -24,6 +31,8 @@ Dates are given for tagged releases only.
   release/hotfix/bugfix branches, documentation published on tags; `notebooks` extra in `pyproject.toml`.
 
 ### Changed
+- `grs`: `error.log` is written next to `log_file.log` in the output folder (was the current folder, where
+  the runs started from the same folder overwrote each other's error log).
 - Faster processing, same products (bit-identical L2A on a Sentinel-2 tile; `execute` about 295 s ->
   150 s on the Loire tile at 20 m):
   - CAMS NetCDF3 files (monthly global files `cams_forecast_YYYY-MM.nc`) read with the xarray `scipy`

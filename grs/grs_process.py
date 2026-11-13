@@ -39,7 +39,7 @@ import dask
 
 import GRSdriver
 
-from . import utils, __version__
+from . import utils, remote, __version__
 from .config import load_config, lut_path, check_luts, ensure_luts
 from .product import Product
 from .cams import CamsProduct
@@ -131,6 +131,19 @@ def _with_workers(method):
     return wrapper
 
 
+def _check_remote_driver(l1c_prod):
+    '''
+    Raise a clear error if the installed GRSdriver cannot read a Level-1 product from a URL.
+
+    :raises GRS_IO_Exception: without ``GRSdriver.remote``
+    '''
+    import importlib.util
+    if importlib.util.find_spec('GRSdriver.remote') is None:
+        raise GRS_IO_Exception(l1c_prod, RuntimeError(
+            f'reading a Level-1 product from a URL needs a GRSdriver version with remote reading '
+            f'(GRSdriver.remote), installed: {GRSdriver.__version__}'))
+
+
 def no_water_marker(odir):
     '''
     Path of the marker file written instead of the product for an image without water (see
@@ -139,12 +152,16 @@ def no_water_marker(odir):
     (``/data/scene.zarr`` -> ``/data/scene_no_water.txt``; a directory without extension, as given by the
     ``grs`` command, ``/data/scene`` -> ``/data/scene/scene_no_water.txt``).
 
-    :param odir: output path given to `Process.execute`
-    :return: Path, or None for a remote output (URL)
+    :param odir: output path given to `Process.execute` (local path or URL)
+    :return: Path, or URL string for a remote output
     '''
     odir = str(odir).rstrip('/')
-    if '://' in odir:
-        return None
+    if remote.is_url(odir):
+        name = remote.basename(odir)
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in _OUTPUT_EXTENSIONS:
+            return odir[:-len(name)] + stem + '_no_water.txt'
+        return remote.join(odir, name + '_no_water.txt')
     path = Path(odir)
     if path.suffix.lower() in _OUTPUT_EXTENSIONS:
         return path.with_name(path.stem + '_no_water.txt')
@@ -253,7 +270,8 @@ class Process:
                 allpixels=False,
                 snap_compliant=False,
                 provide_kernel=False,
-                min_water_area=None
+                min_water_area=None,
+                storage_options=None
                 ):
 
         '''
@@ -267,7 +285,10 @@ class Process:
         section of the configuration (see :py:func:`grs.config.load_config`): None takes the value of the
         configuration, another value overrides it.
 
-        :param l1c_prod: xarray L1C object or L1C input file (path) to be processed
+        :param l1c_prod: xarray L1C object or L1C input file (path) to be processed. The files (Level-1, CAMS,
+            SURFWATER, DEM) can be local paths or URLs (``s3://``, ``https://``..., see :mod:`grs.remote`): the
+            Level-1 bands are read in place by GRSdriver (needs GRSdriver with remote reading,
+            ``GRSdriver.remote``), the other files are copied once into a local cache
         :param odir: Output path, see `write_output` (``.zarr`` / ``.nc`` extension tells the format)
         :param cams_file: CAMS file of the image (global daily or monthly file, or file of the area); None:
             taken from (or downloaded into) the ``YYYY/MM/DD`` archive of ``path: cams`` of the
@@ -280,6 +301,8 @@ class Process:
             the Zarr output. A block needs ~150 MB (512) or ~600 MB (1024) per thread.
         :param aot_resolution: pixel size (meter) of the coarse raster of the aerosol retrieval, e.g. 60, 120,
             240 (default), 480; must be a multiple of ``resolution``
+        :param storage_options: fsspec options of the remote input files (e.g. ``key``, ``secret``,
+            ``endpoint_url`` for S3); default: the environment (``AWS_PROFILE``, ``AWS_ENDPOINT_URL``...)
         :param aot_chunk: size (pixels, on the coarse raster) of the blocks of the aerosol retrieval; one AOT
             value is retrieved per block of ``aot_chunk * aot_resolution`` meters (default 64: 15 km at 240 m)
         :param aot_smoothing_blocks: size, in blocks, of the window of the weighted mean of the block AOT values
@@ -403,16 +426,21 @@ class Process:
         # Get image data
         ##################################
         if isinstance(l1c_prod, str | PathLike):
-            # get extension
-            extension = Path(l1c_prod).suffix
-            basename = Path(l1c_prod).stem
+            # get extension (of a local path or of a URL)
+            name = remote.basename(l1c_prod)
+            extension = Path(name).suffix
+            basename = Path(name).stem
+            if remote.is_url(l1c_prod) and 'nc' not in extension:
+                _check_remote_driver(l1c_prod)
+            driver_kwargs = {'storage_options': storage_options} if remote.is_url(l1c_prod) else {}
             if 'nc' in extension:
                 logging.info('pass netcdf image as grs product object')
-                prod = Product(xr.open_dataset(l1c_prod, engine=NETCDF_ENGINE))
+                prod = Product(xr.open_dataset(remote.local_file(l1c_prod, storage_options), engine=NETCDF_ENGINE))
             elif 'SAFE' in extension:
                 logging.info('Open L1C Sentinel 2 image and compute angle parameters')
                 try:
-                    l1c = GRSdriver.Sentinel2Driver(l1c_prod, resolution=resolution, lazy_geom=True)
+                    l1c = GRSdriver.Sentinel2Driver(str(l1c_prod), resolution=resolution, lazy_geom=True,
+                                                    **driver_kwargs)
                     l1c.load_product()
                 except Exception as exc:
                     raise GRS_IO_Exception(l1c_prod, exc)
@@ -424,7 +452,7 @@ class Process:
             elif ('LC09_L1' in basename) or ('LC08_L1' in basename):
                 logging.info('Open L1TP Landsat image')
                 try:
-                    l1c = GRSdriver.LandsatDriver(l1c_prod, resolution=resolution)
+                    l1c = GRSdriver.LandsatDriver(str(l1c_prod), resolution=resolution, **driver_kwargs)
                     l1c.load_mask()
                     l1c.load_product()
                 except Exception as exc:
@@ -471,7 +499,7 @@ class Process:
         logging.info('get CAMS auxilliary data')
         try:
             if cams_file:
-                cams = CamsProduct(prod.raster, cams_file=cams_file)
+                cams = CamsProduct(prod.raster, cams_file=remote.local_file(cams_file, storage_options))
             else:
                 cams = _cams_from_archive(prod.raster, self.cams_dir)
             cams.load(daily_stats=False)
@@ -487,7 +515,7 @@ class Process:
         if surfwater_file:
             try:
                 logging.info('loading surfwater data file')
-                prod.raster['surfwater'] = rio.open_rasterio(surfwater_file
+                prod.raster['surfwater'] = rio.open_rasterio(remote.local_file(surfwater_file, storage_options)
                                                              ).astype(np.uint8
                                                                       ).squeeze().interp(x=prod.x,
                                                                                          y=prod.y,
@@ -613,7 +641,7 @@ class Process:
         ######################################
         if dem_file:
             logging.info('load dem')
-            dem = xr.open_dataset(dem_file).squeeze().interp(y=prod.raster.y,
+            dem = xr.open_dataset(remote.local_file(dem_file, storage_options)).squeeze().interp(y=prod.raster.y,
                                                              x=prod.raster.x,
                                                              method='nearest')
             dem = dem.rename_vars({'band_data': 'dem'})
@@ -874,10 +902,9 @@ class Process:
             if self.no_water:
                 # image without water (see min_water_area): a marker file instead of the product
                 marker = no_water_marker(self.odir)
-                if marker is not None:
-                    marker.parent.mkdir(parents=True, exist_ok=True)
-                    marker.write_text(''.join(f'{key}: {value}\n' for key, value in
-                                              {**self.no_water_info, 'grs_version': __version__}.items()))
+                remote.write_text(marker, ''.join(f'{key}: {value}\n' for key, value in
+                                                  {**self.no_water_info, 'grs_version': __version__}.items()),
+                                  storage_options=export_kwargs.get('storage_options'))
                 logging.warning('image without water: no L2A product, marker %s', marker)
                 return marker
             logging.warning('no L2A product to write (execute did not complete)')

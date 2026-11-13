@@ -4,7 +4,7 @@ Usage:
   grs <input_file> [--cams_file file] [--odir <odir>] [--resolution res] [--aot_resolution res]\
    [--max_cloud_cover max_cc] [--scale_aot factor] [--opac_model name] [--levname <lev>] [--no_clobber]\
    [--allpixels] [--surfwater file] [--dem_file file] [--suffix suffix] [--snap_compliant]\
-   [--min_water_area area]
+   [--min_water_area area] [--log_dir dir]
   grs -h | --help
   grs -v | --version
 
@@ -12,7 +12,8 @@ Options:
   -h --help        Show this screen.
   -v --version     Show version.
 
-  <input_file>     Input file to be processed
+  <input_file>     Input file to be processed: local path or URL (s3://, https://..., see grs.remote);
+                   the files of the options below and --odir can be URLs too
 
   --cams_file file     Absolute path of the CAMS file to be used (mandatory)
 
@@ -38,9 +39,13 @@ Options:
   --min_water_area area  Do not process the image if it has less water than this area (km2): no product
                          is written, only the marker file <name>_no_water.txt (default: min_water_area of
                          the configuration, 1 km2; 0: only images without any water pixel are skipped)
+  --log_dir dir    Local folder of the log files (log_file.log, error.log); by default the output folder of
+                   the image, or ./<name> for a URL --odir (the log files are then copied next to the product)
 
 
   Example:
+      grs s3://bucket/l1c/S2B_MSIL1C_20220731T103629_N0400_R008_T31TFJ_20220731T124834.SAFE --cams_file s3://bucket/cams/cams_forecast_2022-07.nc --odir s3://bucket/l2a --resolution 20
+      (credentials and endpoint of the bucket: AWS_PROFILE, AWS_ENDPOINT_URL... environment variables)
       grs /data/satellite/S2/L1C/S2B_MSIL1C_20220731T103629_N0400_R008_T31TFJ_20220731T124834.SAFE --cams_file /data/cams/world/cams_forecast_2022-07.nc --resolution 60
   For CNES datalake:
       grs /work/datalake/S2-L1C/31TFJ/2023/06/16/S2B_MSIL1C_20230616T103629_N0509_R008_T31TFJ_20230616T111826.SAFE --cams_file /work/datalake/watcal/ECMWF/CAMS/2023/06/16/2023-06-16-cams-global-atmospheric-composition-forecasts.nc --odir /work/datalake/watcal/test --resolution 20 --dem_file /work/datalake/static_aux/MNT/COP-DEM_GLO-30-DGED_S2_tiles/COP-DEM_GLO-30-DGED_31TFJ.tif
@@ -82,15 +87,17 @@ def set_ofile(filename: str, odir='', level_name='L2GRS', suffix='') -> Path:
     return Path(odir, Path(outfile).stem + suffix)
 
 
-def s2_cloud_cover(safe):
+def s2_cloud_cover(safe, storage_options=None):
     '''
     Cloud cover (0-1) of a Sentinel-2 L1C image, from ``Cloud_Coverage_Assessment`` of its
     ``MTD_MSIL1C.xml`` (read directly: no GDAL needed).
 
-    :param safe: path of the ``.SAFE`` folder
+    :param safe: path or URL of the ``.SAFE`` folder
+    :param storage_options: fsspec options of a URL (see :mod:`grs.remote`)
     '''
-    tree = ElementTree.parse(Path(safe, 'MTD_MSIL1C.xml'))
-    node = next(e for e in tree.iter() if e.tag.split('}')[-1] == 'Cloud_Coverage_Assessment')
+    from . import remote
+    root = ElementTree.fromstring(remote.read_bytes(remote.join(safe, 'MTD_MSIL1C.xml'), storage_options))
+    node = next(e for e in root.iter() if e.tag.split('}')[-1] == 'Cloud_Coverage_Assessment')
     return float(node.text) / 100
 
 
@@ -111,6 +118,17 @@ def limit_malloc_arenas(n=2):
         libc.mallopt(-8, int(n))  # M_ARENA_MAX
     except (OSError, AttributeError, TypeError):
         pass
+
+
+def _upload_logs(log_files, outdir):
+    '''Copy the local log files next to a remote product (a failed copy is only reported).'''
+    from . import remote
+    for log_file in log_files:
+        if Path(log_file).is_file():
+            try:
+                remote.upload(log_file, remote.join(outdir, Path(log_file).name))
+            except Exception as exc:
+                print(f'log file {log_file} not copied to {outdir}: {exc}', file=sys.stderr)
 
 
 def main(argv=None):
@@ -134,12 +152,18 @@ def main(argv=None):
     from .grs_process import Process, no_water_marker
     from .grs_exceptions import GRS_IO_Exception
 
-    file = Path(args['<input_file>'])
-    if not file.exists():
-        print(f'input file not found: {file}', file=sys.stderr)
-        return EXIT_INPUT
-    for name, path in (('CAMS', args['--cams_file']), ('SURFWATER', args['--surfwater']), ('DEM', args['--dem_file'])):
-        if path and not Path(path).exists():
+    from . import remote
+
+    # a URL is kept as a string (Path would turn s3://bucket into s3:/bucket)
+    file = args['<input_file>'] if remote.is_url(args['<input_file>']) else Path(args['<input_file>'])
+    for name, path in (('input', file), ('CAMS', args['--cams_file']), ('SURFWATER', args['--surfwater']),
+                       ('DEM', args['--dem_file'])):
+        try:
+            found = not path or remote.exists(path)
+        except Exception as exc:  # e.g. no credentials or no fsspec driver for the URL
+            print(f'{name} file not readable: {path} ({exc})', file=sys.stderr)
+            return EXIT_INPUT
+        if not found:
             print(f'{name} file not found: {path}', file=sys.stderr)
             return EXIT_INPUT
 
@@ -162,7 +186,7 @@ def main(argv=None):
     ##################################
     # File naming convention
     ##################################
-    basename = file.name
+    basename = remote.basename(file)
     # first check cloud cover (for S2, not implemented for Landsat)
     if ('MSIL1C' in basename) and ('SAFE' in basename):
         cc = s2_cloud_cover(file)
@@ -172,29 +196,33 @@ def main(argv=None):
             return EXIT_SKIPPED
 
     odir = args['--odir']
-    if odir == './':
+    if odir == './' or not odir:
         odir = Path.cwd()
 
     if not suffix:
         suffix = f'_V{__version__}'
 
-    outdir = set_ofile(basename, odir=odir, level_name=lev, suffix=suffix)
-
-    # Process.write_output writes a Zarr store named after the output directory
-    outfile = Path(outdir, outdir.name + ".zarr")
+    # output folder <odir>/<name> and its Zarr store <odir>/<name>/<name>.zarr (Process.write_output)
+    name = set_ofile(basename, level_name=lev, suffix=suffix).name
+    outdir = remote.join(odir, name)
+    outfile = remote.join(outdir, name + '.zarr')
+    remote_output = remote.is_url(outdir)
 
     # skip if already processed, or already found without water (marker file of Process.write_output);
     # checked before the logger is set up, which would overwrite the log file of the previous run
     if noclobber:
-        if outfile.exists():
+        if remote.exists(outfile):
             print(f'File {outfile} already processed; skip!')
             return EXIT_OK
-        if no_water_marker(outdir).exists():
+        if remote.exists(no_water_marker(outdir)):
             print(f'File {no_water_marker(outdir)} found (image without water); skip!')
             return EXIT_SKIPPED
 
-    outdir.mkdir(parents=True, exist_ok=True)
-    class_logger.ServiceLogger(log_file=str(Path(outdir, 'log_file.log')), error_log="error.log", log_level='INFO',
+    # log files: in the output folder, or in a local folder for a remote output (copied there at the end)
+    log_dir = Path(args['--log_dir']) if args['--log_dir'] else (Path.cwd() / name if remote_output else outdir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_files = [log_dir / 'log_file.log', log_dir / 'error.log']
+    class_logger.ServiceLogger(log_file=str(log_files[0]), error_log=str(log_files[1]), log_level='INFO',
                                log_console=False)
 
     logging.info(f'call grs_process for the following paramater. '
@@ -207,7 +235,8 @@ def main(argv=None):
     try:
         process_ = Process()
         process_.execute(file,
-                         odir=outdir,
+                         # the Zarr store itself for a URL (an object storage has no folders to create)
+                         odir=outfile if remote_output else outdir,
                          cams_file=cams_file,
                          resolution=resolution,
                          aot_resolution=aot_resolution,
@@ -229,6 +258,8 @@ def main(argv=None):
     finally:
         # log the run statistics and close the log files
         class_logger.get_instance().close()
+        if remote_output:
+            _upload_logs(log_files, outdir)
     if getattr(process_, 'no_water', False):
         return EXIT_SKIPPED
     return EXIT_OK

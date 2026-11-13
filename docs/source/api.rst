@@ -93,6 +93,22 @@ Configuration
    grs.config.init_user_config
    grs.config.main
 
+Remote files (object storage, web)
+----------------------------------
+
+Inputs and outputs can be URLs (``s3://`` on an S3-compatible storage, ``https://``...): see
+:py:mod:`grs.remote` for the credentials and an example of the ``grs`` command.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   grs.remote.is_url
+   grs.remote.exists
+   grs.remote.read_text
+   grs.remote.local_file
+   grs.remote.cache_dir
+
 Utilities
 ---------
 
