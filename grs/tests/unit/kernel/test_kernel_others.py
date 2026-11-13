@@ -443,3 +443,34 @@ class TestSnapshot:
 
         # Verify that surface pressure is accessed before the CAMS reference is removed.
         mocked_pressure.assert_called_once_with()
+
+class TestRdiffTables:
+    """Kernel._Rdiff_tables: diffuse light LUT at the tested aot_ref values of the aerosol retrievals."""
+
+    @staticmethod
+    def _kernel():
+        kernel = Kernel.__new__(Kernel)
+        rng = np.random.default_rng(0)
+        aot_nodes = np.array([0., 0.1, 0.25, 0.5, 0.8])
+        kernel.Rdiff_lut = xr.DataArray(
+            rng.uniform(0.01, 0.2, (3, len(aot_nodes), 2, 2, 4)),
+            dims=('wl', 'aot_ref', 'sza', 'vza', 'azi'),
+            coords={'wl': [490., 865., 1610.], 'aot_ref': aot_nodes,
+                    'sza': [20., 30.], 'vza': [0., 10.], 'azi': [0., 60., 120., 180.]})
+        return kernel
+
+    def test_linear_in_aot_ref(self):
+        """Same tables as a linear interpolation in aot_ref, also between the nodes"""
+        kernel = self._kernel()
+        aot_refs = np.linspace(0, 0.8, 21)
+        values, indices = kernel._Rdiff_tables(aot_refs)
+        expected = kernel.Rdiff_lut.interp(aot_ref=aot_refs).transpose('aot_ref', 'wl', 'sza', 'vza', 'azi').values
+        np.testing.assert_array_equal(indices, np.arange(len(aot_refs)))
+        np.testing.assert_allclose(values[indices], expected, rtol=1e-12)
+
+    def test_nodes_and_clipping(self):
+        """Exact tables on the nodes, first / last node outside the range of the LUT"""
+        kernel = self._kernel()
+        lut = kernel.Rdiff_lut.transpose('aot_ref', 'wl', 'sza', 'vza', 'azi').values
+        values, _ = kernel._Rdiff_tables([0.25, 0.8, -0.1, 1.2])
+        np.testing.assert_allclose(values, lut[[2, 4, 0, 4]], rtol=1e-12)

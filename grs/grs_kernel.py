@@ -446,16 +446,28 @@ class Kernel():
 
     def _Rdiff_tables(self, aot_refs):
         '''
-        Diffuse light LUT as a numpy array and the indices of the nearest ``aot_ref`` of each value, for the
-        loops of the aerosol retrievals (same tables as ``Rdiff_lut.sel(aot_ref=value, method='nearest')``).
+        Diffuse light LUT at each value of `aot_refs`, as a numpy array, for the loops of the aerosol
+        retrievals: linear interpolation between the two neighbouring ``aot_ref`` nodes of ``Rdiff_lut``
+        (same tables as ``Rdiff_lut.interp(aot_ref=value)``, clipped to the range of the LUT).
+
+        The tested values are not on the nodes of the LUT; the nearest node used before shifted the diffuse
+        light by up to half a node step relative to the direct transmittance, which is computed at the exact
+        value, and gave spurious jumps of the number of negative pixels from one tested value to the next.
 
         :param aot_refs: AOT values at the reference wavelength
-        :return: ``(values, indices)``: array (aot_ref, wl, sza, vza, azi) and integer array, one index per
-            value of `aot_refs`
+        :return: ``(values, indices)``: array (len(aot_refs), wl, sza, vza, azi) and the integer array
+            ``0 .. len(aot_refs) - 1`` (index of the table of each value)
         '''
         lut = self.Rdiff_lut.transpose('aot_ref', 'wl', 'sza', 'vza', 'azi')
-        indices = lut.indexes['aot_ref'].get_indexer(np.asarray(aot_refs, dtype=float), method='nearest')
-        return lut.values, indices
+        nodes = lut.aot_ref.values.astype(float)
+        table = lut.values
+        aot_refs = np.clip(np.asarray(aot_refs, dtype=float), nodes[0], nodes[-1])
+        upper = np.clip(np.searchsorted(nodes, aot_refs, side='right'), 1, len(nodes) - 1)
+        lower = upper - 1
+        frac = (aot_refs - nodes[lower]) / (nodes[upper] - nodes[lower])
+        frac = frac.reshape((-1,) + (1,) * (table.ndim - 1))
+        values = (1. - frac) * table[lower] + frac * table[upper]
+        return values.astype(table.dtype, copy=False), np.arange(len(aot_refs))
 
     @staticmethod
     def _load_block(raster, variables):
@@ -977,7 +989,7 @@ class Kernel():
         if Ny == 0 or Nx == 0:
             return
 
-        # LUT of each aot_ref (nearest) taken with numpy: the xarray selections cost more than the retrieval
+        # LUT of each aot_ref (linear in aot_ref) taken with numpy: the xarray selections cost more than the retrieval
         Rdiff_values, iaots = self._Rdiff_tables(aot_refs)
 
         _pressure = self._surface_pressure.interp(x=raster.x, y=raster.y).values
