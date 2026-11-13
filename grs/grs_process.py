@@ -16,16 +16,14 @@ Memory / dask design
 
 Number of threads: ``execute`` and ``write_output`` run the dask threaded scheduler with ``processor.ncpu``
 workers (configuration), instead of one per core. Every worker holds its blocks in memory, so this sets the
-peak memory (and avoids oversubscribing the cores, numba running its own threads in each block).
+peak memory (about 150 MB per worker for 512 px blocks). The speed stops increasing at about 8 workers
+(GIL, memory bandwidth; measured on 40 cores), so more workers only cost memory.
 
 Format of the output: ``write_output`` takes it from the name of the output path (``.zarr`` or ``.nc``).
 '''
 import os
 from os import PathLike
 from pathlib import Path
-
-from importlib import resources
-import yaml
 
 import numpy as np
 import xarray as xr
@@ -41,7 +39,7 @@ import dask
 
 import GRSdriver
 
-from . import utils
+from . import utils, __version__
 from .config import load_config, lut_path, check_luts, ensure_luts
 from .product import Product
 from .cams import CamsProduct
@@ -52,16 +50,7 @@ from .grs_exceptions import GRS_IO_Exception
 
 opj = os.path.join
 
-configfile = resources.files(__package__) / 'config.yml'
-with open(configfile, 'r') as file:
-    config = yaml.safe_load(file)
-
-GRSDATA = config['path']['grsdata']
-TOALUT = config['path']['toa_lut']
-TRANSLUT = config['path']['trans_lut']
-CAMS_PATH = config['path']['trans_lut']
-NCPU = config['processor']['ncpu']
-NETCDF_ENGINE = config['processor']['netcdf_engine']
+NETCDF_ENGINE = load_config()['processor']['netcdf_engine']
 
 # extensions that tell the output format (see write_output)
 _OUTPUT_EXTENSIONS = ('.zarr', '.nc', '.nc4', '.cdf')
@@ -142,6 +131,47 @@ def _with_workers(method):
     return wrapper
 
 
+def no_water_marker(odir):
+    '''
+    Path of the marker file written instead of the product for an image without water (see
+    ``Process.execute(min_water_area=...)``), so that batch runs can skip it like a processed image:
+    ``<directory>/<basename>_no_water.txt``, with the directory and base name of the product
+    (``/data/scene.zarr`` -> ``/data/scene_no_water.txt``; a directory without extension, as given by the
+    ``grs`` command, ``/data/scene`` -> ``/data/scene/scene_no_water.txt``).
+
+    :param odir: output path given to `Process.execute`
+    :return: Path, or None for a remote output (URL)
+    '''
+    odir = str(odir).rstrip('/')
+    if '://' in odir:
+        return None
+    path = Path(odir)
+    if path.suffix.lower() in _OUTPUT_EXTENSIONS:
+        return path.with_name(path.stem + '_no_water.txt')
+    return path / (path.name + '_no_water.txt')
+
+
+def _water_area(prod):
+    '''
+    Area (km²) of the water pixels of the Level-1 image, with the water test of the processing:
+    (blue - SWIR1) / (blue + SWIR1) > ``vis_swir_index_threshold`` and SWIR2 < ``sunglint_threshold``, on the
+    TOA reflectance (before the gaseous correction and the cloud mask, so it is only used to skip the images
+    without water).
+
+    :param prod: :py:class:`~grs.product.Product` with the TOA reflectance ``prod.raster.bands``
+    :return: area in km² (float)
+    '''
+    bands = prod.raster.bands
+    vis = bands.sel(wl=prod.bvis, method='nearest')
+    swir = bands.sel(wl=prod.bswir, method='nearest')
+    swir2 = bands.sel(wl=prod.bswir2, method='nearest')
+    with np.errstate(invalid='ignore', divide='ignore'):
+        water = ((vis - swir) / (vis + swir) > prod.vis_swir_index_threshold) & (swir2 < prod.sunglint_threshold)
+    npix = int(water.sum())
+    pixel_area = abs(float(prod.raster.x[1] - prod.raster.x[0]) * float(prod.raster.y[1] - prod.raster.y[0]))
+    return npix * pixel_area / 1e6
+
+
 def _cams_from_archive(raster, cams_dir):
     """
     CAMS data of an image from the ``YYYY/MM/DD`` archive of `cams_dir` (``path: cams`` of the
@@ -195,7 +225,11 @@ class Process:
         # and negative Rrs (18)
         self.flags_tokeep = [3]
         self.flags_tomask = [0, 10, 11, 12, 13, 14, 18]
+        self.min_water_area = config['settings'].get('min_water_area', 0.)
         self.successful = False
+        # True when execute stopped because the image has (almost) no water (see min_water_area)
+        self.no_water = False
+        self.l2a = None
 
     @_with_workers
     def execute(self, l1c_prod,
@@ -218,7 +252,8 @@ class Process:
                 opac_model=None,
                 allpixels=False,
                 snap_compliant=False,
-                provide_kernel=False
+                provide_kernel=False,
+                min_water_area=None
                 ):
 
         '''
@@ -242,7 +277,7 @@ class Process:
         :param resolution: pixel resolution in meter
         :param megapix_size: not used for the moment (the wind comes from CAMS, see the TODO below)
         :param chunk: size (pixels) of the blocks of the final processing; 512 divides the 1024 shards of
-            the Zarr output. A block needs ~350 MB (512) or ~1.4 GB (1024) per thread.
+            the Zarr output. A block needs ~150 MB (512) or ~600 MB (1024) per thread.
         :param aot_resolution: pixel size (meter) of the coarse raster of the aerosol retrieval, e.g. 60, 120,
             240 (default), 480; must be a multiple of ``resolution``
         :param aot_chunk: size (pixels, on the coarse raster) of the blocks of the aerosol retrieval; one AOT
@@ -264,7 +299,11 @@ class Process:
             (OmniCloudMask class 0) water pixels are processed
         :param snap_compliant: Output format compliant with SNAP software for practical analysis
         :param provide_kernel: dev option, return the kernel before the retrieval
-        :return: the kernel
+        :param min_water_area: images with less water (km²) are not processed: the function stops right
+            after reading the image, sets ``self.no_water`` and returns None, and ``write_output`` writes
+            the marker file `no_water_marker` instead of the product. None: ``settings: min_water_area`` of
+            the configuration (1 km²); 0: stop only without any water pixel. Not used with `allpixels`.
+        :return: the kernel (None if the image has no water)
 
         Examples
         --------
@@ -350,6 +389,8 @@ class Process:
         self.odir = odir
         self.snap_compliant = snap_compliant
         self.successful = False
+        self.no_water = False
+        self.l2a = None
 
         # stop before reading the image if the LUTs are missing; the LUTs of the configuration are downloaded
         # from Zenodo the first time (see grs.config.ensure_luts), LUT files set by hand are only checked
@@ -406,6 +447,23 @@ class Process:
             raise TypeError('l1c_prod must be a file path or an xarray Dataset, got ' + type(l1c_prod).__name__)
 
         self.prod = prod
+
+        ##################################
+        # Stop early if the image has (almost) no water
+        ##################################
+        if min_water_area is None:
+            min_water_area = self.min_water_area
+        if not allpixels:
+            area = _water_area(prod)
+            if area <= 0 or area < min_water_area:
+                logging.warning('no water to process: %.3f km² of water pixels (minimum %.3f km²), '
+                                'image not processed', area, min_water_area)
+                self.no_water = True
+                self.no_water_info = {'image': str(prod.raster.attrs.get('product_name', l1c_prod)
+                                                   if isinstance(l1c_prod, xr.Dataset) else l1c_prod),
+                                      'water_area_km2': round(area, 4),
+                                      'min_water_area_km2': min_water_area}
+                return None
 
         ##################################
         # GET ANCILLARY DATA (Pressure, O3, water vapor, NO2...
@@ -613,6 +671,31 @@ class Process:
         kernel.set_gas_transmittance()
 
         ######################################
+        # surface rugosity (wind) estimation
+        ######################################
+        # # TODO speed up process (e.g. proper loop)
+        # logging.info('surface rugosity (wind) estimation')
+        # raster = kernel.get_coarse_masked_raster(resolution=megapix_size * resolution).compute()
+        # _Nwl, _height, _width = raster.bands.shape
+        # res = []
+        # for iy in range(0, _height, chunk):
+        #     yc = min(_height, iy + chunk)
+        #
+        #     for ix in range(0, _width, chunk):
+        #         xc = min(_width, ix + chunk)
+        #         res.append(kernel.rugosity_est_chunk(raster[dict(x=slice(ix, xc),
+        #                                                          y=slice(iy, yc))]))
+        #
+        # wind_img = xr.merge(res)
+        # # TODO add uncertainty weight for convolution
+        # kernel.wind_img = kernel.smoothing(wind_img,
+        #                                    varname='wind',
+        #                                    mask=np.ones((3, 3)),
+        #                                    windows=np.array([5, 5]))
+        # coarse CAMS map: loaded once, the blocks of the final process only interpolate it
+        kernel.wind_img = cams.raster.wind.to_dataset().compute()
+
+        ######################################
         # aerosol load estimation
         ######################################
         logging.info('aerosol optical thickness estimation')
@@ -784,7 +867,21 @@ class Process:
         :param fmt: ``'zarr'`` or ``'netcdf'`` to force the format (None: from the name of the output)
         :param export_kwargs: options of ``L2aProduct.export`` (e.g. ``chunks``, ``shards``, ``compression``,
             ``storage_options``, ``max_concurrency``, ``pyramids``)
+        :return: for an image without water (see ``execute(min_water_area=...)``), the path of the marker file
+            written instead of the product (`no_water_marker`)
         '''
+        if self.l2a is None:
+            if self.no_water:
+                # image without water (see min_water_area): a marker file instead of the product
+                marker = no_water_marker(self.odir)
+                if marker is not None:
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                    marker.write_text(''.join(f'{key}: {value}\n' for key, value in
+                                              {**self.no_water_info, 'grs_version': __version__}.items()))
+                logging.warning('image without water: no L2A product, marker %s', marker)
+                return marker
+            logging.warning('no L2A product to write (execute did not complete)')
+            return None
         logging.info('export final product')
         if fmt is None and Path(str(self.odir).rstrip('/')).suffix.lower() not in _OUTPUT_EXTENSIONS:
             fmt = 'zarr'

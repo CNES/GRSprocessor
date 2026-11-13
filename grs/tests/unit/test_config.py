@@ -47,11 +47,13 @@ def default_config(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def clean_environment(monkeypatch):
-    """Remove configuration-related environment variables."""
+def clean_environment(monkeypatch, tmp_path):
+    """Remove configuration-related environment variables, and hide the user file of the computer
+    (~/.config/grs/config.yml) behind a temporary home folder."""
     for name in ("GRS_CONFIG", "GRS_DATA_ROOT", "XDG_CONFIG_HOME",
                  "GRS_NO_DOWNLOAD"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
 
 @pytest.fixture
@@ -311,7 +313,7 @@ class TestDataRootSource:
 
         assert cfg.data_root_source() == "user configuration"
 
-    def test_reports_default_folder(isolated_config):
+    def test_reports_default_folder(self, isolated_config):
         assert cfg.data_root_source() == "default folder"
 
 # ============================================================

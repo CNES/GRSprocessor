@@ -120,14 +120,46 @@ Version history
 2.2.0:
     - version with CI for CNES operation
 
+3.0.0:
+    - merge of the scientific developments (major update for rugosity and aerosol retrievals,
+      refinement of the aerosol retrieval algorithm; developed as 2.2.0 and 2.2.1, not released)
+      with the CI from v2.1.9
+
+3.1.0:
+    - new masking procedure including OmniCloudMask
+    - export in 'zarr' with pyramids
+    - fixed weighting of the AOT smoothing, windows scaled with the retrieval blocks
+    - configuration read at run time (grs_config), look-up tables downloaded from Zenodo
+    - settings of the aerosol retrieval in the configuration (aerosol section), blocks of 15 km
+      by default (validated with AERONET-OC)
+    - CAMS archive in a YYYY/MM/DD tree
+    - lower memory use and faster processing; unit tests
+    - PyPI package GRSprocessor
+
+3.1.1:
+    - cloud screening with OmniCloudMask only (s2cloudless removed): only the clear-sky water pixels
+      (OmniCloudMask class 0) are processed
+    - images without water (less than min_water_area, 1 km²) not processed: marker file
+      <name>_no_water.txt instead of the product, skipped by --no_clobber
+    - faster processing, same products: CAMS NetCDF3 files read by memory map, LUT window around the
+      image angles, aerosol retrieval loops in numpy
+    - lower memory of the final processing (float32 blocks), one numba thread per block, thread-safe
+      numba layer
 '''
 
 __package__ = 'grs'
-__version__ = '3.0.0'
+__version__ = '3.1.1'
 
 
 import importlib
+import os
 from typing import TYPE_CHECKING
+
+# the numba kernels (parallel=True) are called from several dask threads at once: numba's fallback
+# ``workqueue`` threading layer aborts the process on concurrent calls ("Concurrent access has been
+# detected"), so ask for a thread-safe layer (tbb, else OpenMP). A layer set by the user is kept. Must be
+# set before numba compiles its first parallel kernel.
+os.environ.setdefault('NUMBA_THREADING_LAYER', 'threadsafe')
 
 # public classes and the submodule defining them; a submodule is imported the first time one of its classes
 # is accessed (``grs.Process``, ``from grs import Masking``), so ``import grs`` and ``grs -v`` do not load

@@ -1,5 +1,7 @@
 """Unit tests for Kernel.final_process_chunk and kernel.final_process."""
 
+import functools
+
 from unittest.mock import MagicMock, Mock
 
 import numpy as np
@@ -11,6 +13,14 @@ from grs.grs_kernel import Kernel
 # ============================================================
 # Fixtures and helpers
 # ============================================================
+
+
+def _unwrap(func):
+    """Block function given to map_blocks, without the numba-thread wrapper of final_process
+    (functools.partial(_call_with_numba_threads, func, nthreads))."""
+    if isinstance(func, functools.partial):
+        return func.args[0]
+    return func
 
 @pytest.fixture
 def kernel_final_process():
@@ -558,7 +568,7 @@ class TestFinalProcess:
         assert captured["obj"]["bands"].chunksizes["x"] == (4, 4)
         assert captured["obj"]["bands"].chunksizes["wl"] == (raster.sizes["wl"],)
 
-        assert captured["func"] == snapshot.final_process_chunk
+        assert _unwrap(captured["func"]) == snapshot.final_process_chunk
         assert captured["kwargs"]["iwl_swir"] == [-2, -1]
 
         assert kernel.xres is result
@@ -657,7 +667,7 @@ class TestFinalProcess:
         monkeypatch.setattr(kernel, "_snapshot", snapshot_factory)
 
         def fake_map_blocks(func, obj, kwargs, template):
-            assert func == snapshot.final_process_chunk
+            assert _unwrap(func) == snapshot.final_process_chunk
             return template
 
         monkeypatch.setattr(xr, "map_blocks", fake_map_blocks)

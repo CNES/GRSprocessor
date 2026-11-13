@@ -1,69 +1,112 @@
 Installation
 ============
 
-Look-up tables
---------------
-
-The radiative transfer look-up tables (LUT) are not part of the package. Download them from
-`grsdata <https://drive.google.com/drive/folders/1N0-FtW-PTPblR4z-82fFrUTekMd8e3Vz?usp=sharing>`__
-and save them in a directory of your choice (``your_GRSDATA_PATH`` below).
+GRSprocessor needs **Python 3.11 or newer**. It is a pure Python package, distributed on PyPI as
+``GRSprocessor``: all its dependencies (including `GRSdriver <https://github.com/Tristanovsk/GRSdriver>`__,
+which reads the L1C images) are installed by pip, and the GDAL Python bindings are not needed.
 
 Python environment
 ------------------
 
-Python >= 3.12 is required. With conda:
+Install GRSprocessor in a dedicated environment, with venv:
 
 .. code-block:: bash
 
-   conda create -n grs python=3.12
+   python3.12 -m venv .venv
+   source .venv/bin/activate          # Windows: .venv\Scripts\activate
+   python -m pip install --upgrade pip
+
+or with conda (Python only; the packages are then installed with pip):
+
+.. code-block:: bash
+
+   conda create -n grs python=3.12 pip
    conda activate grs
 
-The dependencies (``requirements.txt``, including
-`GRSdriver <https://github.com/Tristanovsk/GRSdriver>`__) are installed with the package below.
+PyTorch (computers without GPU)
+-------------------------------
 
-Configuration
--------------
-
-Set the paths of the LUTs in ``grs/config.yml`` before installing:
-
-.. code-block:: yaml
-
-   path:
-     grsdata: 'your_GRSDATA_PATH'
-     toa_lut: 'toa_lut_opac_wind_light_v2.nc'
-     trans_lut: 'transmittance_lut_opac_wind_light_v2.nc'
-     cams: 'your_CAMS_PATH'
-
-   processor:
-     ncpu: 8                          # number of processes of the multiprocessing pool
-     chunk: 512
-
-.. note::
-
-   In this version, ``path.cams`` and ``processor.chunk`` are not used: the CAMS file must be given
-   for each image (``--cams_file``) and the block size of the processing is 512 pixels.
-
-Install the package
--------------------
-
-From the root of the repository:
+The cloud masks use OmniCloudMask, which installs PyTorch. On a computer without a GPU, install the CPU
+build of PyTorch first, much smaller than the default (CUDA) one:
 
 .. code-block:: bash
 
-   pip install .
+   python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-Then check the command-line tool:
+Install GRSprocessor
+--------------------
+
+From PyPI (the package is ``grs``, ``import grs``, and it installs the commands ``grs`` and
+``grs_config``):
+
+.. code-block:: bash
+
+   python -m pip install GRSprocessor
+
+or from the source code (e.g. for the development version):
+
+.. code-block:: bash
+
+   git clone https://github.com/CNES/GRSprocessor.git
+   cd GRSprocessor
+   python -m pip install .
+   # to develop (editable install with the test and build tools):
+   python -m pip install -e ".[dev]"
+
+Check the installation and the configuration in use:
 
 .. code-block:: bash
 
    grs -v
+   grs_config
+
+To upgrade: ``python -m pip install --upgrade GRSprocessor``.
+
+Look-up tables
+--------------
+
+The radiative transfer look-up tables (LUTs, about 1 GB of NetCDF files) are not in the package: they
+are downloaded from `Zenodo <https://doi.org/10.5281/zenodo.23394202>`__ (checksums verified) the first
+time an image is processed, into the default LUT folder (``~/.local/share/grs/lut`` on Linux). To
+download them beforehand and check them:
+
+.. code-block:: bash
+
+   grs_config --download
+   grs_config
+
+- To keep the LUTs in another folder (e.g. a copy shared by several users), write it in your user
+  configuration file with ``grs_config --init /path/to/lut``, or set the ``GRS_DATA_ROOT`` environment
+  variable.
+- Without internet access (e.g. on the nodes of a cluster), download the LUTs beforehand and switch the
+  automatic download off with ``GRS_NO_DOWNLOAD=1`` (or ``zenodo: auto_download: false`` in the user
+  configuration).
+
+The configuration is read at run time: no need to reinstall the package after changing it. See
+:doc:`configuration`.
+
+CAMS atmospheric data
+---------------------
+
+GRSprocessor uses the CAMS global atmospheric composition forecasts (aerosols, ozone, water vapour, pressure,
+wind) of the date of the image, from the `Copernicus Atmosphere Data Store
+<https://ads.atmosphere.copernicus.eu>`__ (ADS). Give a CAMS NetCDF file to the processing, or let GRSprocessor
+download it: create an ADS account, accept the licence of the dataset *CAMS global atmospheric
+composition forecasts*, and write your API key in ``~/.cdsapirc``:
+
+.. code-block:: text
+
+   url: https://ads.atmosphere.copernicus.eu/api
+   key: <your-personal-access-token>
+
+See the :doc:`CAMS tutorial <examples/auxdata>` for the CAMS archive and the download.
 
 Build this documentation
 ------------------------
 
 .. code-block:: bash
 
-   pip install ".[docs]"
+   python -m pip install ".[docs]"
    sphinx-build -b html docs/source docs/build/html
 
 The example notebooks are not executed: they are rendered with the outputs saved in them.

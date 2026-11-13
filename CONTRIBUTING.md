@@ -42,7 +42,7 @@ required to actually run `grs` on data.
 ## Running tests
 
 ```bash
-pytest grs/tests/unit/ grs/tests/integration_tests/
+pytest grs/tests/unit/
 ```
 
 The unit tests (`grs/tests/unit/`, about 10 s) run on a small L1C subset stored in the repository

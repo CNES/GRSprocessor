@@ -1,389 +1,143 @@
+"""End-to-end test: L1C subset -> L2A Zarr product (needs the look-up tables)."""
+
 import os
-from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import xarray as xr
-import dask.array as da
-
-import grs.grs_process as grs_process
-
-from grs.grs_process import _correct_gas_absorption, _interp_like, _cams_from_archive
-
-
-def test_correct_gas_absorption_no_chunks():
-    x_bands = np.array([0., 1., 2.])
-    y_bands = np.array([0., 1., 2.])
-
-    wl = np.array([500., 600.])
-
-    bands_values = np.array([
-        # Bande 500 nm
-        [
-            [0.4, 0.5, 0.6],
-            [0.5, 0.6, 0.7],
-            [0.6, 0.7, 0.8],
-        ],
-        # Bande 600 nm
-        [
-            [0.2, 0.3, 0.4],
-            [0.3, 0.4, 0.5],
-            [0.4, 0.5, 0.6],
-        ],
-    ])
-
-    bands = xr.DataArray(
-        bands_values.copy(),
-        dims=("wl", "y", "x"),
-        coords={
-            "wl": wl,
-            "y": y_bands,
-            "x": x_bands,
-        },
-    )
-    
-    x_tg = np.array([0., 2.])
-    y_tg = np.array([0., 2.])
-    
-    Tg_values = np.array([
-        [
-            [0.5, 0.7],
-            [0.9, 1.1],
-        ],
-        [
-            [0.8, 0.7],
-            [0.6, 0.5],
-        ],
-    ])
-
-    Tg_raster = xr.DataArray(
-        Tg_values,
-        dims=("wl", "y", "x"),
-        coords={
-            "wl": wl,
-            "y": y_tg,
-            "x": x_tg,
-        },
-    )
-    
-    Tg_expected = np.array([
-        [
-            [0.5, 0.6, 0.7],
-            [0.7, 0.8, 0.9],
-            [0.9, 1.0, 1.1],
-        ],
-        [
-            [0.8, 0.75, 0.7],
-            [0.7, 0.65, 0.6],
-            [0.6, 0.55, 0.5],
-        ],
-    ])
-    
-    expected = bands_values / Tg_expected
-    
-    result = _correct_gas_absorption(bands=bands, Tg_raster=Tg_raster)
-    xr.testing.assert_allclose(
-        result,
-        xr.DataArray(
-            expected,
-            dims=("wl", "y", "x"),
-            coords={
-                "wl": wl,
-                "y": y_bands,
-                "x": x_bands,
-            },
-        ),
-        rtol=1e-7,
-        atol=1e-7,
-    )
-
-# ============================================================
-# _interp_like
-# ============================================================
-
-class TestInterpLike:
-    
-    def test_nominal(self):
-        coarse = xr.DataArray(
-            np.array([
-                [0, 20],
-                [40, 60],
-            ]),
-            dims=("y", "x"),
-            coords={
-                "y": np.array([0, 2]),
-                "x": np.array([0, 2]),
-                "time": np.datetime64("2025-01-01"),
-            },
-            name= "original"
-        )
-        
-        like = xr.DataArray(
-            da.zeros((5, 5), chunks=(2, 2)),
-            dims=("y", "x"),
-            coords={
-                "y": np.arange(5) / 2,
-                "x": np.arange(5) / 2,
-                "quality": (
-                    ("y","x"),
-                    np.ones((5,5)),
-                )
-            },
-        )
-        
-        result = _interp_like(coarse, like, name="interpolated")
-        computed = result.compute()
-        expected = np.array([
-            [0, 5, 10, 15,  20],
-            [10, 15, 20, 25, 30],
-            [20, 25, 30, 35, 40],
-            [30, 35, 40, 45, 50],
-            [40, 45, 50, 55, 60],
-        ])
-        assert isinstance(result.data, da.Array)
-        assert result.shape == like.shape
-        assert result.dims == ("y", "x")
-        assert result.dtype == np.float64
-        assert "x" in result.coords
-        assert "y" in result.coords
-        assert "time" in result.coords
-        assert result.coords["time"].ndim == 0
-        np.testing.assert_equal(
-            result.coords["time"].values,
-            np.datetime64("2025-01-01"),
-        )
-        assert result.name == "interpolated"
-        assert "quality" not in result.coords
-        np.testing.assert_allclose(result, expected)
-
-    def test_outside_source_bounds(self):
-        coarse = xr.DataArray(
-            [[0.0, 1.0], [2.0, 3.0]],
-            dims=("y", "x"),
-            coords={
-                "y": [0, 2],
-                "x": [0, 2],
-            },
-        )
-
-        like = xr.DataArray(
-            np.zeros((3, 4)),
-            dims=("y", "x"),
-            coords={
-                "y": [0, 1, 2],
-                "x": [0, 1, 2, 3],
-            },
-        )
-
-        result = _interp_like(coarse, like)
-
-        assert result.sel(x=3).isnull().all()
-
-# ============================================================
-# _cams_from_archive
-# ============================================================
-
-class TestCamsFromArchive:
-    
-    def test_file_exists(self,monkeypatch, caplog):
-        raster = Mock()
-        raster.attrs = {"tile": "T31ABC"}
-
-        cams = Mock()
-        cams.filepath = "/cams/2025/01/01/cams.nc"
-        cams.date_str = "2025-01-01"
-
-        constructor_calls = []
-
-        def fake_cams_product(*args, **kwargs):
-            constructor_calls.append((args, kwargs))
-            return cams
-
-        monkeypatch.setattr(grs_process, "CamsProduct", fake_cams_product)
-
-        monkeypatch.setattr(
-            grs_process.os.path,
-            "exists",
-            lambda path: path == cams.filepath,
-        )
-
-        result = _cams_from_archive(raster, "/cams")
-
-        assert result is cams
-
-        assert len(constructor_calls) == 1
-        assert constructor_calls[0][0] == (raster,)
-        assert constructor_calls[0][1] == {
-            "dir": "/cams",
-            "suffix": "_T31ABC",
-        }
-
-    def test_uses_legacy_file(self,monkeypatch):
-        raster = Mock()
-        raster.attrs = {"tile": "T31ABC"}
-
-        cams_archive = Mock()
-        cams_archive.filepath = "/cams/archive.nc"
-        cams_archive.date_str = "2025-01-01"
-
-        cams_legacy = Mock()
-        cams_legacy.filepath = "/cams/T31ABC/2025-01-01-forecast_T31ABC.nc"
-
-        constructor_calls = []
-
-        def fake_cams_product(*args, **kwargs):
-            constructor_calls.append((args, kwargs))
-
-            if "cams_file" in kwargs:
-                return cams_legacy
-
-            return cams_archive
-
-        monkeypatch.setattr(grs_process, "CamsProduct", fake_cams_product)
-
-        legacy_path = os.path.join(
-            "/cams",
-            "T31ABC",
-            "2025-01-01-forecast_T31ABC.nc",
-        )
-
-        existing_files = {legacy_path}
-
-        monkeypatch.setattr(
-            grs_process.os.path,
-            "exists",
-            lambda path: path in existing_files,
-        )
-
-        result = _cams_from_archive(raster, "/cams")
-
-        assert result is cams_legacy
-
-        assert len(constructor_calls) == 2
-
-        assert constructor_calls[1][0] == (raster,)
-        assert constructor_calls[1][1] == {
-            "cams_file": legacy_path,
-        }
-
-    def test_no_existing_file(self,monkeypatch):
-        raster = Mock()
-        raster.attrs = {"tile": "T31ABC"}
-
-        cams = Mock()
-        cams.filepath = "/cams/archive.nc"
-        cams.date_str = "2025-01-01"
-
-        constructor_calls = []
-
-        def fake_cams_product(*args, **kwargs):
-            constructor_calls.append((args, kwargs))
-            return cams
-
-        monkeypatch.setattr(grs_process, "CamsProduct", fake_cams_product)
-
-        monkeypatch.setattr(
-            grs_process.os.path,
-            "exists",
-            lambda path: False,
-        )
-
-        result = _cams_from_archive(raster, "/cams")
-
-        assert result is cams
-        assert len(constructor_calls) == 1
-
-# ============================================================
-# _aerosol_settings
-# ============================================================
-
-class TestAerosolSettings:
-    
-    def test_from_config(self,monkeypatch):
-        config = {
-            key: f"value_{key}"
-            for key in grs_process.AEROSOL_SETTINGS
-        }
-
-        monkeypatch.setattr(
-            grs_process,
-            "load_config",
-            lambda: {"aerosol": config},
-        )
-
-        result = grs_process._aerosol_settings()
-
-        assert result == config
-
-    def test_override(self,monkeypatch):
-        config = {
-            key: f"value_{key}"
-            for key in grs_process.AEROSOL_SETTINGS
-        }
-
-        key = grs_process.AEROSOL_SETTINGS[0]
-
-        monkeypatch.setattr(
-            grs_process,
-            "load_config",
-            lambda: {"aerosol": config},
-        )
-
-        result = grs_process._aerosol_settings(**{key: "new_value"})
-
-        assert result[key] == "new_value"
-
-    def test_none_override(self,monkeypatch):
-        config = {
-            key: f"value_{key}"
-            for key in grs_process.AEROSOL_SETTINGS
-        }
-
-        key = grs_process.AEROSOL_SETTINGS[0]
-
-        monkeypatch.setattr(
-            grs_process,
-            "load_config",
-            lambda: {"aerosol": config},
-        )
-
-        result = grs_process._aerosol_settings(**{key: None})
-
-        assert result[key] == config[key]
-
-    def test_missing_key(self,monkeypatch):
-        missing_key = grs_process.AEROSOL_SETTINGS[0]
-
-        config = {
-            key: f"value_{key}"
-            for key in grs_process.AEROSOL_SETTINGS
-            if key != missing_key
-        }
-
-        monkeypatch.setattr(
-            grs_process,
-            "load_config",
-            lambda: {"aerosol": config},
-        )
-
-        with pytest.raises(KeyError, match="aerosol settings missing"):
-            grs_process._aerosol_settings()
-        
-    def test_missing_key_provided_by_override(self,monkeypatch):
-        missing_key = grs_process.AEROSOL_SETTINGS[0]
-
-        config = {
-            key: f"value_{key}"
-            for key in grs_process.AEROSOL_SETTINGS
-            if key != missing_key
-        }
-
-        monkeypatch.setattr(
-            grs_process,
-            "load_config",
-            lambda: {"aerosol": config},
-        )
-
-        result = grs_process._aerosol_settings(**{missing_key: "provided_value"})
-
-        assert result[missing_key] == "provided_value"
+import zarr
+
+EXPECTED_VARIABLES = ('Rrs', 'BRDFg', 'aot550', 'flags', 'mask', 'wind', 'sza', 'vza', 'raa')
+
+
+@pytest.fixture(scope='module')
+def l2a(l2a_zarr):
+    with xr.open_zarr(l2a_zarr, group='0') as ds:
+        yield ds.load()
+
+
+@pytest.fixture(scope='module')
+def l1c(l1c_path):
+    with xr.open_dataset(l1c_path) as ds:
+        yield ds.load()
+
+
+def test_groups(l2a_zarr):
+    groups = {name for name, _ in zarr.open_group(l2a_zarr, mode='r').groups()}
+    assert {'0', 'ancillary'} <= groups
+
+
+def test_zarr_encoding(l2a_zarr):
+    """Every image variable is compressed (Blosc), the wind is packed like the other variables."""
+    level = zarr.open_group(l2a_zarr, mode='r')['0']
+    for var in EXPECTED_VARIABLES:
+        codecs = [c.to_dict()['name'] for c in level[var].metadata.codecs]
+        if codecs[0] == 'sharding_indexed':
+            codecs = [c['name'] for c in level[var].metadata.codecs[0].to_dict()['configuration']['codecs']]
+        assert 'blosc' in codecs, (var, codecs)
+    assert level['wind'].dtype == np.int16
+    assert level['wind'].attrs['units'] == 'm s-1'
+
+
+def test_quicklooks(l2a_zarr, l2a):
+    """PNG quicklooks next to the store: image size, transparent outside the image, water in colour."""
+    from PIL import Image
+    base = os.path.splitext(l2a_zarr)[0]
+    images = {}
+    for kind in ('l1c_rgb', 'l2a_rgb', 'sunglint'):
+        with Image.open(f'{base}_ql_{kind}.png') as im:
+            assert im.mode == 'RGBA'
+            images[kind] = np.asarray(im)
+        assert images[kind].shape == (l2a.sizes['y'], l2a.sizes['x'], 4)    # 128 px: no reduction
+        assert (images[kind][..., 3] == 255).mean() > 0.9, kind
+    water = (l2a.mask == 0).values
+    rgb = images['l2a_rgb'][..., :3].astype(int)
+    assert (rgb[water].std(axis=1) > 0).mean() > 0.5          # coloured water, not the grey of the land
+    assert (rgb[~water] == round(0.6 * 255)).all()
+    assert images['l1c_rgb'][..., :3].max() > 100
+
+
+def test_variables_and_grid(l2a, l1c):
+    missing = [v for v in EXPECTED_VARIABLES if v not in l2a]
+    assert not missing
+    np.testing.assert_allclose(l2a.x, l1c.x)
+    np.testing.assert_allclose(l2a.y, l1c.y)
+    assert l2a.Rrs.dims == ('wl', 'y', 'x')
+    assert l2a.sizes['wl'] == 11
+
+
+def test_attributes(l2a):
+    assert l2a.attrs['aot_resolution'] == 240
+    assert l2a.attrs['opac_model'] in ('ARCT_rh70', 'COAV_rh70', 'DESE_rh70', 'MACL_rh70', 'URBA_rh70', 'WASO_rh0')
+
+
+def test_mask_and_flags(l2a):
+    assert set(np.unique(l2a.mask.values)) <= {0, 1}
+    assert l2a.flags.dtype == np.uint32
+    assert 0.2 < float((l2a.mask == 0).mean()) < 0.95      # water, land and shoreline in the subset
+
+
+def test_clear_sky():
+    """Clear sky = none of the OmniCloudMask bits (11 thick cloud, 12 thin cloud, 13 shadow) set."""
+    from grs.mask import Masking, OCM_BITS
+    assert OCM_BITS == (11, 12, 13)
+    flags = xr.DataArray(np.array([[0, 1 << 3, 1 << 11, 1 << 12],
+                                   [1 << 13, (1 << 3) | (1 << 12), 1 << 10, 1 << 14]], dtype=np.uint32),
+                         dims=('y', 'x'))
+    expected = [[True, True, False, False], [False, False, True, True]]
+    np.testing.assert_array_equal(Masking.clear_sky(flags).values, expected)
+    np.testing.assert_array_equal(Masking.clear_sky(flags.chunk({'y': 1})).values, expected)
+
+
+def test_no_s2cloudless_flags(l2a):
+    """The former s2cloudless bits (1, 2) are not set any more."""
+    assert not (l2a.flags.values & ((1 << 1) | (1 << 2))).any()
+
+
+def test_cloud_screening(monkeypatch, l1c_path, cams_path, l2a, tmp_path):
+    """Pixels of OmniCloudMask class != 0 are not processed (NaN Rrs) and masked.
+
+    The test subset is cloud-free: OmniCloudMask is replaced by a fake prediction with thick cloud, thin cloud
+    and shadow on three bands of rows of the (60 m) image, the rest clear."""
+    import omnicloudmask
+    import grs
+
+    def fake_predict(array, **kwargs):
+        classes = np.zeros(array.shape[1:], dtype=np.uint8)
+        classes[:20], classes[20:30], classes[30:40] = 1, 2, 3
+        return classes[np.newaxis]
+
+    monkeypatch.setattr(omnicloudmask, 'predict_from_array', fake_predict)
+    process = grs.Process()
+    process.execute(l1c_path, cams_file=cams_path, resolution=60, odir=str(tmp_path / 'l2a.zarr'))
+    cloudy_l2a = process.l2a.l2_prod[['Rrs', 'flags', 'mask']].compute()
+
+    flags = cloudy_l2a.flags.values
+    for bit, rows in ((11, slice(0, 20)), (12, slice(20, 30)), (13, slice(30, 40))):
+        assert ((flags[rows] >> bit) & 1).all(), bit
+    cloudy = np.zeros(flags.shape, dtype=bool)
+    cloudy[:40] = True
+    rrs = cloudy_l2a.Rrs.sel(wl=560).values
+    assert np.isnan(rrs[cloudy]).all()
+    assert (cloudy_l2a.mask.values[cloudy] == 1).all()
+    # the clear water pixels are still processed and kept
+    clear_water = ~cloudy & (l2a.mask.values == 0)
+    assert clear_water.sum() > 1000
+    assert np.isfinite(rrs[clear_water]).mean() > 0.99
+    assert (cloudy_l2a.mask.values[clear_water] == 0).mean() > 0.99
+
+
+def test_rrs_on_water(l2a):
+    water = (l2a.mask == 0).values
+    for wl in (443, 560, 665, 865):
+        rrs = l2a.Rrs.sel(wl=wl).values
+        assert np.isfinite(rrs[water]).mean() > 0.99, wl
+    rrs560 = l2a.Rrs.sel(wl=560).values[water]
+    assert 0 < np.median(rrs560) < 0.1
+
+
+def test_aot(l2a):
+    aot = l2a.aot550.values
+    assert np.all(np.isfinite(aot))
+    assert np.all(aot >= 0)                                  # clipped at 0 after the smoothing
+    assert float(aot.max()) < 1.5

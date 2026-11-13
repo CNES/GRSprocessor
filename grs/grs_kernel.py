@@ -162,14 +162,25 @@ Dask design
   with ``xr.map_blocks``, evaluated chunk by chunk when it is written (e.g. by ``L2aProduct``), so the
   full ``Rrs`` raster is never in memory. The ``aot_ref`` loops keep a running pixel count instead of one
   full raster per ``aot_ref``.
-* **Numba:** the kernels of ``Rasterization`` are called from several dask threads. If they are compiled
-  with ``parallel=True``, the default ``workqueue`` threading layer aborts on concurrent calls: use
-  ``NUMBA_THREADING_LAYER=omp`` (or ``tbb``), or a process-based scheduler.
+* **Blocks stay in float32.** In ``final_process_chunk`` the coarse maps interpolated to the block
+  (``interp`` returns float64) are cast to float32, the products are done in place and the temporaries
+  are released as soon as they are used: this halves the peak memory of a block (per dask thread) with
+  the same results (differences ~1e-8 in Rrs) and the same speed.
+* **Numba:** the kernels of ``Rasterization`` (``parallel=True``) are called from several dask threads.
+  The ``workqueue`` threading layer aborts on concurrent calls, even with one numba thread per worker, so
+  ``import grs`` sets ``NUMBA_THREADING_LAYER=threadsafe`` (tbb, else OpenMP) unless it is already set.
+  The blocks of ``final_process`` run with one numba thread each (``NUMBA_THREADS_PER_BLOCK``; the
+  setting is local to the dask thread, the calls of the main thread keep all the cores): the dask threads
+  are the parallelism, so ``processor.ncpu`` is the number of busy cores. Measured on 40 cores, 3072 x 3072
+  pixels: 8 dask x 1 numba thread is as fast as 8 x 40 (6.4 s, within the noise), and numba parallelism
+  hardly helps even alone (1 x 1: 20.9 s, 1 x 40: 19.5 s). Throughput stops increasing at about 8 dask threads (GIL, memory bandwidth): more threads only add
+  memory (one block each).
 
 Chunking: ``final_process(..., chunk=512)`` divides the 1024 x 1024 shards of ``L2aProduct.export_to_zarr``,
 which merges four blocks per shard at export time without recomputing them.
 '''
 import copy
+import functools
 import logging
 import types
 import warnings
@@ -181,6 +192,7 @@ import xarray as xr
 xr.set_options(keep_attrs=True)
 import rioxarray  # noqa: F401  (registers the .rio accessor used by the callers)
 
+import numba
 from numba import njit
 from scipy import ndimage
 
@@ -198,6 +210,22 @@ AEROSOL_COMBINATION = config['settings']['aerosol_combination']
 # arrays smaller than this (bytes) are loaded in memory once instead of being recomputed by every block
 _SMALL_ARRAY_BYTES = 512 * 2 ** 20
 
+# numba threads of the parallel kernels inside a dask block: the dask threads are the parallelism, a full set
+# of numba threads per block only oversubscribes the cores (8 dask x 1 numba thread: as fast as 8 x 40 on 40
+# cores, and only ``processor.ncpu`` busy cores, e.g. on a shared node or a PBS/SLURM allocation)
+NUMBA_THREADS_PER_BLOCK = 1
+
+
+def _call_with_numba_threads(func, nthreads, *args, **kwargs):
+    '''Call `func` with `nthreads` numba threads in the calling thread (setting local to the thread), then
+    restore the previous number.'''
+    previous = numba.get_num_threads()
+    numba.set_num_threads(max(1, min(nthreads, numba.config.NUMBA_NUM_THREADS)))
+    try:
+        return func(*args, **kwargs)
+    finally:
+        numba.set_num_threads(previous)
+
 
 def _load_small(obj, max_bytes=_SMALL_ARRAY_BYTES):
     '''
@@ -210,6 +238,34 @@ def _load_small(obj, max_bytes=_SMALL_ARRAY_BYTES):
     if isinstance(obj, (xr.DataArray, xr.Dataset)) and obj.chunks and obj.nbytes <= max_bytes:
         return obj.compute()
     return obj
+
+
+def _lut_window(lut, **values):
+    '''
+    Part of a look-up table that covers given values, for a linear interpolation on them.
+
+    Along each dimension, the grid points from the last one below the smallest value to the first one
+    above the largest value are kept (at least two points), so that the interpolation on the window gives
+    the same result as on the whole table (values outside the grid stay NaN). Only this window is then read
+    from the file: e.g. the few solar and viewing zenith angles of an image instead of the whole table.
+
+    :param lut: DataArray or Dataset with ascending coordinates along the dimensions of `values`
+    :param values: dimension name -> array of the values to interpolate on (NaN ignored)
+    :return: `lut` restricted to the windows (lazy if `lut` is)
+    '''
+    windows = {}
+    for dim, vals in values.items():
+        vals = np.asarray(vals, dtype=float)
+        vals = vals[np.isfinite(vals)]
+        grid = lut[dim].values
+        if vals.size == 0 or grid.size < 2:
+            continue
+        i0 = max(int(np.searchsorted(grid, vals.min(), side='right')) - 1, 0)
+        i1 = min(int(np.searchsorted(grid, vals.max(), side='left')), grid.size - 1)
+        if i1 <= i0:  # a single grid point: keep a neighbour (interpolation needs two points)
+            i0, i1 = (i0, i0 + 1) if i0 + 1 < grid.size else (i0 - 1, i0)
+        windows[dim] = slice(i0, i1 + 1)
+    return lut.isel(windows)
 
 
 def _unique_values(*arrays):
@@ -300,9 +356,14 @@ def _find_min_cost(cost, values):
     best_cost = np.full((ny, nx), np.nan)
     for iy in range(ny):
         for ix in range(nx):
-            if np.isnan(cost[:, iy, ix]).all():
+            # smallest non-NaN cost (np.argmin would return the first NaN; nanargmin is not in numba)
+            ind = -1
+            for i in range(n):
+                c = cost[i, iy, ix]
+                if not np.isnan(c) and (ind < 0 or c < cost[ind, iy, ix]):
+                    ind = i
+            if ind < 0:
                 continue
-            ind = np.nanargmin(cost[:, iy, ix])
             best_value[iy, ix] = values[ind]
             best_cost[iy, ix] = cost[ind, iy, ix]
     return best_value, best_cost
@@ -382,6 +443,19 @@ class Kernel():
     def _cams_aod550(self):
         '''CAMS AOD at 550 nm, in memory (coarse grid).'''
         return self._cached('aod550', lambda: _load_small(self.cams.cams_aod.interp(wl=550, method='quadratic')))
+
+    def _Rdiff_tables(self, aot_refs):
+        '''
+        Diffuse light LUT as a numpy array and the indices of the nearest ``aot_ref`` of each value, for the
+        loops of the aerosol retrievals (same tables as ``Rdiff_lut.sel(aot_ref=value, method='nearest')``).
+
+        :param aot_refs: AOT values at the reference wavelength
+        :return: ``(values, indices)``: array (aot_ref, wl, sza, vza, azi) and integer array, one index per
+            value of `aot_refs`
+        '''
+        lut = self.Rdiff_lut.transpose('aot_ref', 'wl', 'sza', 'vza', 'azi')
+        indices = lut.indexes['aot_ref'].get_indexer(np.asarray(aot_refs, dtype=float), method='nearest')
+        return lut.values, indices
 
     @staticmethod
     def _load_block(raster, variables):
@@ -502,8 +576,9 @@ class Kernel():
 
         The angles are rounded (`ang_resol`) and only their unique values are kept in the LUTs, which
         speeds up the later interpolations. The unique values are found in one pass over the angle rasters
-        without loading them (dask). The resulting tables are loaded in memory once, so the blocks do not
-        recompute them.
+        without loading them (dask). Only the window of the radiance table around these angles is read
+        (see `_lut_window`), once per run, and the models are mixed before the angular interpolation. The
+        resulting tables are loaded in memory once, so the blocks do not recompute them.
 
         Sets ``trans_aero_lut``, ``Rray``, ``Rdiff_lut``, ``aot_lut``, ``szas``, ``vzas``, ``azis``,
         ``aot_refs``, ``sunglint_eps``, ``rot``, and adds ``sza_trunc``, ``vza_trunc``, ``raa_trunc`` to
@@ -557,19 +632,34 @@ class Kernel():
         self.trans_aero_lut = self.trans_aero_lut.squeeze().reset_coords(drop=True)
 
         # ----------------------------------------
+        # radiance tables on the angles of the image
+        # ----------------------------------------
+        # The radiance table I is large (several GB, compressed): only its window around the angles of the
+        # image is read (a few MB), and the aerosol models are mixed before the angular interpolation
+        # (linear, so the order does not change the result), which interpolates one table instead of one per
+        # model. The windows only depend on the angles, the wind and the mixture: read once, the second call
+        # (refined LUT) does not read the file again.
+        def radiance_windows():
+            radiance = _lut_window(aero_lut.I, sza=sza_, vza=vza_, azi=azi_).load()
+            return (radiance.isel(model=0).sel(aot_ref=0, method='nearest'),
+                    (radiance * aerosol_combination).sum('model'))
+
+        key = ('radiance_windows', float(aero_lut.wind), tuple(sorted(ang_resol.items())),
+               tuple(aerosol_combination.values.tolist()))
+        rayleigh, mixed = self._cached(key, radiance_windows)
+        Rray_ang = rayleigh.interp(sza=sza_, vza=vza_).interp(azi=azi_)
+        Rdiff_ang = mixed.interp(sza=sza_, vza=vza_).interp(azi=azi_)
+
+        # ----------------------------------------
         # interpolation Rayleigh
         # ----------------------------------------
-        self.Rray = aero_lut.I.isel(model=0).sel(aot_ref=0, method='nearest')
-        self.Rray = self.Rray.interp(sza=sza_, vza=vza_).interp(azi=azi_)
-        self.Rray = (self.Rray.interp(wl=self.wl_true, method='quadratic') /
-                     np.cos(np.radians(self.Rray.sza)))
+        self.Rray = (Rray_ang.interp(wl=self.wl_true, method='quadratic') /
+                     np.cos(np.radians(Rray_ang.sza)))
 
         # ----------------------------------------
         # interpolation atmo diffuse light
         # ----------------------------------------
-        self.Rdiff_lut = aero_lut.I.interp(sza=sza_, vza=vza_).interp(azi=azi_)
-        self.Rdiff_lut = (self.Rdiff_lut * aerosol_combination).sum('model')
-        self.Rdiff_lut = self.Rdiff_lut.interp(aot_ref=aot_refs, method='quadratic')
+        self.Rdiff_lut = Rdiff_ang.interp(aot_ref=aot_refs, method='quadratic')
         self.Rdiff_lut = (self.Rdiff_lut.interp(wl=self.wl_true, method='quadratic') /
                           np.cos(np.radians(self.Rdiff_lut.sza)))
 
@@ -887,7 +977,8 @@ class Kernel():
         if Ny == 0 or Nx == 0:
             return
 
-        Rdiff_lut_ = self.Rdiff_lut.isel(wl=idx_swir)
+        # LUT of each aot_ref (nearest) taken with numpy: the xarray selections cost more than the retrieval
+        Rdiff_values, iaots = self._Rdiff_tables(aot_refs)
 
         _pressure = self._surface_pressure.interp(x=raster.x, y=raster.y).values
         _Tg_diff_raster = self.Tg_diff_raster.isel(wl=idx_swir).interp(x=raster.x, y=raster.y)
@@ -904,12 +995,12 @@ class Kernel():
 
         counter = _NegativeCounter(base_threshold=0.)
         xres = []
-        for _aot_ref in aot_refs:
+        for _aot_ref, iaot in zip(aot_refs, iaots):
             # get LUT values
             _Rdiff = _R_.interp_Rlut_rayleigh(self.szas, _sza,
                                               self.vzas, _vza,
                                               self.azis, _azi,
-                                              Nwl, Ny, Nx, Rdiff_lut_.sel(aot_ref=_aot_ref, method='nearest').values)
+                                              Nwl, Ny, Nx, Rdiff_values[iaot][idx_swir])
 
             _Rdiff = _Rdiff * _Tg_abs_diff * _pressure_
 
@@ -1026,7 +1117,9 @@ class Kernel():
         _raa = raster.raa
         _vza = raster.vza
         _azi = (180. - _raa) % 360
+        # numpy (wl, y, x) or (y, x) for a mono-view sensor: the loop below is pure numpy
         _air_mass_ = Misc.air_mass(_sza, _vza)
+        _air_mass_ = _air_mass_.transpose(*[d for d in ('wl', 'y', 'x') if d in _air_mass_.dims]).values
         _pressure_ = _pressure / self.pressure_ref
 
         sigma2 = (self.wind_img.wind + 0.586) / 195.3
@@ -1044,11 +1137,17 @@ class Kernel():
         aot_ref_bound = np.min([aot_ref_max_in * 1.02, self.aot_ref_lim])
         aot_refs = np.linspace(0, aot_ref_bound, 21)
 
+        # LUTs of all the aot_refs taken at once, as numpy arrays: one xarray call per aot_ref (interpolation,
+        # selection, arithmetic on DataArrays) cost several times the retrieval itself
+        aot_values = self.aot_lut.interp(aot_ref=aot_refs, method='quadratic').transpose('aot_ref', 'wl').values
+        Rdiff_values, iaots = self._Rdiff_tables(aot_refs)
+        # (wl, 1, 1): broadcast on the (wl, y, x) or (y, x) air mass
+        aot_rot = aot_values + rot_term
+        aot_rot = aot_rot.reshape(aot_rot.shape + (1, 1))
+
         counter = _NegativeCounter(base_threshold=-0.0003)
         xres = []
-        for _aot_ref in aot_refs:
-            _aot = self.aot_lut.interp(aot_ref=_aot_ref, method='quadratic')  # .values
-
+        for i, _aot_ref in enumerate(aot_refs):
             arr_tmp = np.full((Nwl, Ny, Nx), np.nan, dtype=np.float32)
 
             # get LUT values
@@ -1056,7 +1155,7 @@ class Kernel():
                                               self.vzas, vza_values,
                                               self.azis, azi_values,
                                               Nwl, Ny, Nx,
-                                              self.Rdiff_lut.sel(aot_ref=_aot_ref, method='nearest').values)
+                                              Rdiff_values[iaots[i]])
 
             _Rdiff = _Rdiff * _Tg_abs_diff * _pressure_
 
@@ -1064,7 +1163,7 @@ class Kernel():
             Rcorr = band - _Rdiff
 
             # direct transmittance up/down
-            Tdir = np.exp(-(_aot + rot_term) * _air_mass_)  # acutils.Misc.transmittance_dir(_aot, _air_mass_, _rot_raster)
+            Tdir = np.exp(-aot_rot[i] * _air_mass_)
 
             Rf = np.full((len(iwl_swir), Ny, Nx), np.nan, dtype=np.float32)
             for iwl in iwl_swir:
@@ -1202,7 +1301,7 @@ class Kernel():
             # image edges, outside the first / last centres (NaN otherwise), within the range of the LUT
             _aot_ref_raster = np.clip(aot_ref_raster.interp(x=x_subset, y=y_subset,
                                                             kwargs={'fill_value': 'extrapolate'}).values,
-                                      self.aot_refs.min(), self.aot_refs.max())
+                                      self.aot_refs.min(), self.aot_refs.max()).astype(np.float32)
             # aot550 is given for all the pixels, the other outputs only where a band is valid
             aot_tmp[:] = _aot_ref_raster
 
@@ -1215,13 +1314,13 @@ class Kernel():
             Ttot_Ed_lut = self.trans_aero_lut.Ttot_Ed
 
             sigma2 = (self.wind_img.wind + 0.586) / 195.3
-            _sigma2_ = sigma2.interp(x=x_subset, y=y_subset)
+            _sigma2_ = sigma2.interp(x=x_subset, y=y_subset).astype(np.float32)
 
             # subsetting
             _sza = raster.sza
-            _pressure = self._surface_pressure.interp(x=x_subset, y=y_subset).values
-            _Tg_diff_raster = self.Tg_diff_raster.interp(x=x_subset, y=y_subset).values
-            _Tg_raster = self.Tg_raster.interp(x=x_subset, y=y_subset).values
+            _pressure = self._surface_pressure.interp(x=x_subset, y=y_subset).values.astype(np.float32)
+            _Tg_diff_raster = self.Tg_diff_raster.interp(x=x_subset, y=y_subset).values.astype(np.float32)
+            _Tg_raster = self.Tg_raster.interp(x=x_subset, y=y_subset).values.astype(np.float32)
 
             _raa = raster.raa
             _vza = raster.vza
@@ -1253,9 +1352,9 @@ class Kernel():
             # a (y, x) DataArray times the (wl, y, x) numpy arrays of Tdir fails with recent xarray
             _air_mass_ = Misc.air_mass(_sza, _vza).values
             _p_slope_ = self.p_slope(_sza, _vza, _raa, sigma2=_sigma2_,
-                                     monoview=monoview).values
+                                     monoview=monoview).values.astype(np.float32, copy=False)
 
-            _pressure_ = _pressure / self.pressure_ref
+            _pressure_ = (_pressure / self.pressure_ref).astype(np.float32)
 
             # construct wl,y,x raster for Rayleigh optical thickness
             _rot_raster = _R_._multiplicate(self.rot.values, _pressure_, arr_tmp)
@@ -1267,16 +1366,20 @@ class Kernel():
                                      self.aot_refs, _aot_ref_raster,
                                      Nwl, Ny, Nx, self.Rdiff_lut.values)
 
-            _Rdiff = _Rdiff * _Tg_diff_raster * _pressure_
+            _Rdiff *= _Tg_diff_raster
+            _Rdiff *= _pressure_
+            del _Tg_diff_raster
 
             _aot = _R_._interp_aotlut(self.aot_lut.aot_ref.values,
                                       _aot_ref_raster, Nwl, Ny, Nx, self.aot_lut.values)
 
             #  correction for diffuse light
             Rcorr = _band_rad.values - _Rdiff
+            del _Rdiff, _band_rad
 
             # direct transmittance up/down
             Tdir = Misc.transmittance_dir(_aot, _air_mass_, _rot_raster)
+            del _aot, _air_mass_, _rot_raster
 
             # vTotal transmittance (for Ed and Lu)
             Tdown = _R_._interp_Tlut(self.szas, _sza.values, Ttot_Ed_lut.aot_ref.values,
@@ -1284,7 +1387,10 @@ class Kernel():
                                      Ttot_Ed_lut.values)
             Tup = _R_._interp_Tlut(self.vzas, _vza_mean, Ttot_Ed_lut.aot_ref.values,
                                    _aot_ref_raster, Nwl, Ny, Nx, Ttot_Ed_lut.values ** 1.05)
-            Ttot_du = Tdown * Tup * _Tg_raster
+            Tdown *= Tup
+            Tdown *= _Tg_raster
+            Ttot_du = Tdown
+            del Tup
 
             Rf = np.full((len(iwl_swir), Ny, Nx), np.nan, dtype=np.float32)
             for iwl in iwl_swir:
@@ -1307,10 +1413,17 @@ class Kernel():
             # slope probability of the reference band: (y, x) for monoview sensors, the same for all the bands
             # (indexing it would take a row of the block)
             _p_slope_ref = _p_slope_ if monoview else _p_slope_[-2]
-            Rf = _Tg_raster * Tdir * Rf * _p_slope_ / (sunglint_eps[-2] * _p_slope_ref)
+            Rf = Rf * _Tg_raster
+            Rf *= Tdir
+            Rf *= _p_slope_
+            Rf /= (sunglint_eps[-2] * _p_slope_ref).astype(np.float32)
+            del Tdir, _p_slope_
 
             # sunglint removal
-            Rrs_tmp_ = ((Rcorr - Rf) / np.pi)
+            Rrs_tmp_ = Rcorr
+            Rrs_tmp_ -= Rf
+            Rrs_tmp_ /= np.float32(np.pi)
+            del Rf
 
             # Convert from TOA to BOA for positive values
             Ttot_du[Rrs_tmp_ < 0] = 1.
@@ -1337,7 +1450,8 @@ class Kernel():
                       aot_ref_raster,
                       iwl_swir=[-2, -1],
                       chunk=512,
-                      lazy=True
+                      lazy=True,
+                      numba_threads=NUMBA_THREADS_PER_BLOCK
                       ):
         '''
         Rrs, sunglint reflectance and AOT of the whole image, computed lazily block by block.
@@ -1351,10 +1465,12 @@ class Kernel():
         :param aot_ref_raster: DataArray (y, x) with the AOT at the reference wavelength, on a coarse grid
             (it is loaded in memory if lazy and small)
         :param iwl_swir: indices of the two SWIR bands used for the sunglint
-        :param chunk: block size in pixels. A block needs about ``15 * n_bands * chunk**2 * 8`` bytes while it
-            is computed (~350 MB for 512, ~1.4 GB for 1024, per thread). 512 divides the 1024 shards of
+        :param chunk: block size in pixels. A block needs about ``13 * n_bands * chunk**2 * 4`` bytes while it
+            is computed (~150 MB for 512, ~600 MB for 1024, per thread). 512 divides the 1024 shards of
             ``export_to_zarr``, which merges four blocks per shard without recomputing anything.
         :param lazy: if False, compute the result immediately (needs the memory of the full output)
+        :param numba_threads: numba threads of each block (the blocks run in parallel in the dask threads;
+            None: numba default, one per core)
         :return: Dataset ``xres`` with ``Rrs`` (wl, y, x), ``BRDFg`` (y, x), ``aot550`` (y, x)
 
         Notes
@@ -1375,7 +1491,10 @@ class Kernel():
                                'BRDFg': xr.full_like(plane, np.nan, dtype=dtype),
                                'aot550': xr.full_like(plane, np.nan, dtype=dtype)})
 
-        xres = xr.map_blocks(self._snapshot().final_process_chunk, block,
+        func = self._snapshot().final_process_chunk
+        if numba_threads:
+            func = functools.partial(_call_with_numba_threads, func, numba_threads)
+        xres = xr.map_blocks(func, block,
                              kwargs=dict(aot_ref_raster=aot_ref_raster, iwl_swir=iwl_swir),
                              template=template)
         self.xres = xres if lazy else xres.compute()

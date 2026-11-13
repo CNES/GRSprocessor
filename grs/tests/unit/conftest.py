@@ -23,35 +23,36 @@ def cams_path():
     return CAMS_SUBSET
 
 
-def lut_files():
-    """
-    Look-up tables used by the end-to-end tests: those of grs/config.yml, in the folder given by the
-    environment variable GRS_TEST_GRSDATA if set (e.g. a local copy of grsdata).
-    """
-    from grs.grs_process import GRSDATA, TOALUT, TRANSLUT
-    grsdata = os.environ.get('GRS_TEST_GRSDATA', GRSDATA)
-    if grsdata is None:
-        return ()
-    return os.path.join(grsdata, TOALUT), os.path.join(grsdata, TRANSLUT)
+@pytest.fixture
+def isolated_config(tmp_path, monkeypatch):
+    """Configuration without the user file of the computer (empty user file, cache cleared)."""
+    from grs.config import load_config
+    user_file = tmp_path / 'config.yml'
+    user_file.write_text('')
+    monkeypatch.setenv('GRS_CONFIG', str(user_file))
+    monkeypatch.delenv('GRS_NO_DOWNLOAD', raising=False)
+    load_config.cache_clear()
+    yield user_file
+    load_config.cache_clear()
 
 
 def luts_available():
-    files = lut_files()
-    return bool(files) and all(os.path.exists(f) for f in files)
+    from grs.config import lut_status
+    return all(exists for _, _, exists in lut_status())
+
+
+requires_luts = pytest.mark.skipif(not luts_available(),
+                                   reason='look-up tables not installed (grs_config --download)')
 
 
 @pytest.fixture(scope='session')
-def l2a_files(tmp_path_factory, l1c_path, cams_path):
-    """
-    L2A product made once by the full processing chain from the test L1C subset: NetCDF files
-    <odir>/<name>.nc and <odir>/<name>_anc.nc (ancillary data).
-    """
+def l2a_zarr(tmp_path_factory, l1c_path, cams_path):
+    """L2A Zarr product made once by the full processing chain from the test L1C subset."""
     if not luts_available():
-        pytest.skip('look-up tables not found (set GRS_TEST_GRSDATA to the folder of the LUTs)')
+        pytest.skip('look-up tables not installed (grs_config --download)')
     import grs
-    odir = tmp_path_factory.mktemp('l2a') / 'l2a'
+    odir = str(tmp_path_factory.mktemp('l2a') / 'l2a.zarr')
     process = grs.Process()
-    process.lut_file, process.trans_lut_file = lut_files()
-    process.execute(l1c_path, cams_file=cams_path, resolution=60, odir=str(odir))
+    process.execute(l1c_path, cams_file=cams_path, resolution=60, odir=odir)
     process.write_output()
-    return str(odir / 'l2a.nc'), str(odir / 'l2a_anc.nc')
+    return odir

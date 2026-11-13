@@ -10,12 +10,12 @@ Process description
 Description
 ~~~~~~~~~~~
 
-GRS (Glint Removal for Sentinel-2-like sensors) is an atmospheric and sunglint correction
+GRSprocessor (Glint Removal for Sentinel-2-like sensors) is an atmospheric and sunglint correction
 processor for high-spatial-resolution, multispectral optical satellite images acquired over
 aquatic environments. Given one Level-1 (top-of-atmosphere) product, it corrects successively
 for gaseous absorption, diffuse sky light reflected by the air-water interface, and sunglint,
 to retrieve the water-leaving radiance/reflectance at the surface level. The full scientific
-description is available on the :doc:`methods` page.
+description is available on the :doc:`index` page.
 
 The processor is invoked through the ``grs`` command-line executable
 (entry point ``grs.run:main``, see :py:mod:`grs.run`), which wraps the core
@@ -30,7 +30,7 @@ date and one tile/footprint**:
 - one Sentinel-2 A/B ``MSIL1C`` ``.SAFE`` product, or
 - one Landsat-8/9 Level-1 (``L1TP``/``L1GT``) product.
 
-The output granule is a single Level-2 GRS product covering the same footprint and resolution as
+The output granule is a single Level-2 GRSprocessor product covering the same footprint and resolution as
 the input tile: a Zarr store with pyramids (default), or NetCDF files (see `Output product format`_).
 
 Scheduling and Triggers
@@ -63,7 +63,7 @@ GRSProcessor has no built-in scheduler; it is triggered externally, granule by g
      superseded by SLURM on the current CNES cluster.
 - **Containerized**: via the Docker image built from
   `Dockerfile <https://github.com/CNES/GRSprocessor/blob/main/Dockerfile>`_
-  (see "Compile Docker image locally" in the `README <https://github.com/CNES/GRSprocessor#compile-docker-image-locally>`__).
+  (see :doc:`index` "Compile Docker image locally").
 
 Dataflow
 --------
@@ -75,7 +75,7 @@ Dataflow
 .. only:: latex
 
    The dataflow diagram is drawn with Mermaid: see the
-   `online documentation <https://grs.readthedocs.io/en/latest/processing_chain.html#dataflow>`__.
+   `online documentation <https://grs.readthedocs.io/en/v3.x/processing_chain.html#dataflow>`__.
 
 Inputs
 ------
@@ -114,12 +114,12 @@ Outputs
    * - Data Type Name
      - Cardinality
      - Description
-   * - Level-2 GRS product (Zarr)
+   * - Level-2 GRSprocessor product (Zarr)
      - 1..1
      - Water-leaving reflectance product, one Zarr store per granule with the full resolution, its
        overviews (pyramids) and the ancillary data (see `Output product format`_ and
        `Data Types`_ for naming). Default output of the ``grs`` command line.
-   * - Level-2 GRS product (NetCDF)
+   * - Level-2 GRSprocessor product (NetCDF)
      - 0..1
      - Alternative format, from the Python API (output path ending in ``.nc``): main file and
        ancillary file ``<name>_anc.nc``, without overviews.
@@ -328,7 +328,7 @@ Data Types
      - one tile, one date
      - e.g. SURFWATER product naming,
        ``SURFWATER_OPTICAL-SINGLE_<tile>_<datetime>_<datetime>_<version>.tif``
-   * - Level-2 GRS output
+   * - Level-2 GRSprocessor output
      - Zarr store (with pyramids) of the water-leaving reflectance product
      - one tile, one date
      - ``<odir>/<name>/<name>.zarr`` with ``<name>`` = input basename with L1C/L1GT/L1TP replaced
