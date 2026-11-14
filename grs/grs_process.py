@@ -371,7 +371,9 @@ class Process:
             after reading the image, sets ``self.no_water`` and returns None, and ``write_output`` writes
             the marker file `no_water_marker` instead of the product. None: ``settings: min_water_area`` of
             the configuration (1 km²); 0: stop only without any water pixel. Not used with `allpixels`.
-        :return: the kernel (None if the image has no water)
+            The processing stops in the same way (``self.no_water``, None returned, marker file) when no
+            clear-sky water pixel is left after the cloud masking (water entirely under clouds).
+        :return: the kernel (None if the image has no water or no clear-sky water pixel)
 
         Examples
         --------
@@ -671,15 +673,22 @@ class Process:
             prod.raster['sza'] = prod.raster['sza'].where(mask)
             del bands
 
+            # stop if no clear-sky water pixel is left (e.g. water entirely under clouds): nothing to process,
+            # and the angle tables of the LUT preparation would be empty. Same outcome as an image without
+            # water (min_water_area): self.no_water, None returned, marker file written by write_output
+            n_clear = int(mask.sum())
+            if n_clear == 0:
+                logging.warning('no clear-sky water pixel (water under clouds or cloud shadows), '
+                                'image not processed')
+                self.no_water = True
+                self.no_water_info = {'image': str(prod.raster.attrs.get('product_name', l1c_prod)
+                                                   if isinstance(l1c_prod, xr.Dataset) else l1c_prod),
+                                      'reason': 'no clear-sky water pixel',
+                                      'clear_water_pixels': 0}
+                return None
+
         # the band selections are views of the bands: release them now rather than at the end of execute
         del vis, nir, swir, swir2
-
-            # TODO @Thales check if it is in agreement with your policy (here stop if no water pixel and return empty object)
-            # stop process if no valid (water) pixel available
-            # if np.isnan(prod.raster['sza'].values).all():
-            #    logging.info('no water pixels, stop process')
-            #    return
-            # END TODO
 
         ######################################
         # get DEM information

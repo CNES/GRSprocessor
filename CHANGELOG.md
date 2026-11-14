@@ -67,6 +67,10 @@ Dates are given for tagged releases only.
   and GRSdriver >= 2.0.4 (no EOReader, sertit, fiona). The processing code of 3.1.1 is kept.
 
 ### Fixed
+- Images whose water is entirely under clouds (no clear-sky water pixel after the cloud masking) crashed in
+  `Kernel.lut_preparation` (`ValueError: zero-size array to reduction operation fmin`, empty angle tables):
+  `Process.execute` now logs a warning and stops like an image without water (`no_water`, None returned,
+  marker file written by `write_output`, with the reason `no clear-sky water pixel`).
 - Sunglint removal of the multi-view sensors (Sentinel-2), `Kernel.final_process_chunk`: the glint estimated
   in the SWIR was normalised with `sunglint_eps` and `p_slope` of the last band (2190 nm) but propagated to
   the other bands with those of the 1610 nm band, so that only ε(2190)/ε(1610) ≈ 0.89 of the glint was
