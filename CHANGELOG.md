@@ -23,6 +23,11 @@ Dates are given for tagged releases only.
   the product, `write_output` writes the marker file `<name>_no_water.txt` (image, water area, minimum,
   version), skipped like a product by `grs --no_clobber` and by the batch tutorial (status `no_water`).
   Not used with `allpixels`.
+- Hybrid aerosol retrieval under sunglint (opt-in, `aerosol: glint_aot` of the configuration or `glint_aot`
+  argument of `execute`, default off): `Kernel.aerosol_visible_chunk` also returns the slopes of the visible
+  Rrs (560, 665 nm) against the glint for a grid of AOT; pooled over the blocks under strong glint
+  (`glint_aot_min_glint`, default 0.02), their zero crossing gives an AOT clipped to the admissible window
+  of the retrieval. Removes most of the glint stripes due to the over-estimated AOT on glinted scenes.
 - Unit tests of the `Kernel` retrievals (`grs/tests/unit/kernel/`: LUT preparation, coarse rasters, wind,
   SWIR and visible aerosol, final processing), of the masking, output product, configuration, command line,
   exceptions and utilities (from `develop`, PR #24 and #26).
@@ -31,8 +36,9 @@ Dates are given for tagged releases only.
   release/hotfix/bugfix branches, documentation published on tags; `notebooks` extra in `pyproject.toml`.
 
 ### Changed
-- Requires GRSdriver >= 2.1 (was 2.0.4), the first version reading the Level-1 products in place from a bucket
-  (`GRSdriver.remote`), used by the URL inputs above.
+- Requires GRSdriver >= 2.1.1 (was 2.0.4): 2.1 is the first version reading the Level-1 products in place from
+  a bucket (`GRSdriver.remote`), used by the URL inputs above; 2.1.1 gives the Landsat relative azimuth in the
+  convention of Sentinel-2 (`(vaa - saa) % 360`), needed by the Landsat sunglint fix below.
 - `grs`: `error.log` is written next to `log_file.log` in the output folder (was the current folder, where
   the runs started from the same folder overwrote each other's error log).
 - Faster processing, same products (bit-identical L2A on a Sentinel-2 tile; `execute` about 295 s ->
@@ -66,8 +72,11 @@ Dates are given for tagged releases only.
   the other bands with those of the 1610 nm band, so that only ε(2190)/ε(1610) ≈ 0.89 of the glint was
   removed in every band (regression of 3.0, 2.2.1 was consistent). On a glinted Sentinel-2 scene the
   residual glint was ~3e-3 sr-1 at 1610 nm and ~2e-3 sr-1 in the green. Unit test on a glint-only scene
-  (Rrs = 0); the same test, expected to fail, documents the monoview sensors (Landsat), where the glint is
-  still divided by `sunglint_eps` twice.
+  (Rrs = 0).
+- Sunglint removal of the monoview sensors (Landsat), `Kernel.aerosol_visible_chunk` and
+  `Kernel.final_process_chunk`: the glint was divided twice by `sunglint_eps`; same normalisation as
+  Sentinel-2. On a glinted Landsat 8 scene, the residual Rrs(1610) drops from 2.6e-3 to 0 sr-1 and the
+  retrieved AOT from 0.17 to 0.05 (CAMS 0.07).
 - Thread-safe numba threading layer by default (`NUMBA_THREADING_LAYER=threadsafe`: TBB, else OpenMP,
   unless set by the user): the fallback `workqueue` layer aborted the process on the concurrent calls of
   the numba kernels from the dask threads.
