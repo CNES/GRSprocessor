@@ -291,3 +291,90 @@ class TestAerosolVisibleChunkOutputs:
         assert kernel.xres.sizes["wl"] == 9
         assert kernel.xres.sizes["y"] == 2
         assert kernel.xres.sizes["x"] == 2
+
+# ============================================================
+# Tests glint-based AOT (hybrid estimator)
+# ============================================================
+
+class TestGlintAOT:
+
+    def test_outputs(self, kernel_visible):
+        """The block gives the statistics of the hybrid estimator"""
+        result = kernel_visible.aerosol_visible_chunk(kernel_visible.test_raster)
+        assert result["glint_sxy"].dims == ("aot_grid", "y", "x")
+        for name in ("aot_low", "aot_glint", "glint_ref", "glint_sxx"):
+            assert name in result
+            assert result[name].shape == (1, 1)
+        # 4 pixels < min_glint_pixels: no slope
+        assert np.isnan(result["aot_glint"].values[0, 0])
+
+    def test_zero_crossing(self):
+        from grs.grs_kernel import _zero_crossing
+        aot = np.array([0., 0.1, 0.2, 0.3])
+        assert np.isclose(_zero_crossing(aot, [-2., -1., 1., 2.]), 0.15)
+        assert np.isclose(_zero_crossing(aot, [-2., np.nan, 2., 3.]), 0.1)
+        assert np.isnan(_zero_crossing(aot, [1., 2., 3., 4.]))
+        assert np.isnan(_zero_crossing(aot, [-1., -2., -3., -4.]))
+
+
+class TestGlintHybrid:
+
+    @staticmethod
+    def _img(aot_ref, aot_low, slopes, glint_ref, glint_sxx):
+        """blocks along x; slopes: function of the AOT grid for each block (None: NaN)"""
+        from grs.grs_kernel import GLINT_AOT_GRID
+        v = lambda a: (("y", "x"), np.array([a], dtype=float))
+        sxy = np.array([np.full(len(GLINT_AOT_GRID), np.nan) if f is None else f(GLINT_AOT_GRID) * w
+                        for f, w in zip(slopes, glint_sxx)]).T[:, None, :]
+        return xr.Dataset({"aot_ref": v(aot_ref), "aot_low": v(aot_low),
+                           "glint_ref": v(glint_ref), "glint_sxx": v(glint_sxx),
+                           "glint_sxy": (("aot_grid", "y", "x"), sxy),
+                           "number_of_pixel": v([10] * len(aot_ref))},
+                          coords={"y": [0.], "x": np.arange(len(aot_ref), dtype=float),
+                                  "aot_grid": GLINT_AOT_GRID})
+
+    def test_hybrid(self):
+        from grs.grs_process import _glint_hybrid_aot
+        img = self._img(aot_ref=[0.40, 0.40, 0.15, 0.30], aot_low=[0.05, 0.25, 0.0, 0.05],
+                        slopes=[lambda t: t - 0.10, lambda t: t - 0.30, lambda t: t - 0.2, lambda t: t - 0.9],
+                        glint_ref=[0.1, 0.1, 0.1, 0.001], glint_sxx=[1., 3., 0., 1.])
+        out, tau = _glint_hybrid_aot(img, min_glint=0.02)
+        # pooled slope of the strong-glint blocks (3rd: no spread, 4th: weak glint): sxx-weighted crossing
+        assert np.isclose(tau, (0.10 * 1 + 0.30 * 3) / 4)
+        # clipped to [aot_low, aot_ref] in the strong-glint blocks, unchanged elsewhere
+        assert np.allclose(out.aot_ref.values[0], [0.25, 0.25, 0.15, 0.30])
+
+    def test_no_crossing(self):
+        from grs.grs_process import _glint_hybrid_aot
+        img = self._img(aot_ref=[0.40], aot_low=[0.05], slopes=[lambda t: t + 1.], glint_ref=[0.1], glint_sxx=[1.])
+        out, tau = _glint_hybrid_aot(img, min_glint=0.02)
+        assert tau is None
+        assert np.allclose(out.aot_ref.values, 0.40)
+
+    def test_block_outside_grid(self):
+        """the pooled slope is only defined where every strong-glint block is"""
+        from grs.grs_process import _glint_hybrid_aot
+        f = lambda t: np.where(t <= 0.2, t - 0.3, np.nan)
+        img = self._img(aot_ref=[0.40, 0.40], aot_low=[0., 0.], slopes=[lambda t: t - 0.1, f],
+                        glint_ref=[0.1, 0.1], glint_sxx=[1., 1.])
+        out, tau = _glint_hybrid_aot(img, min_glint=0.02)
+        # sum defined up to 0.2 only: (t - 0.1) + (t - 0.3) crosses at 0.2
+        assert np.isclose(tau, 0.2)
+
+
+# ============================================================
+# Sunglint propagation (mono-view sensor, e.g. Landsat)
+# ============================================================
+
+class TestGlintPropagationMonoview:
+
+    def test_glint_only_scene_removed(self, kernel_visible):
+        """TOA reflectance made of sunglint only: at aot_ref = 0 (no diffuse light, the same direct transmittance in
+        all the bands) the glint estimated in the SWIR and propagated with sunglint_eps removes the whole signal"""
+        kernel = kernel_visible
+        eps = np.array([1.70, 1.66, 1.60, 1.53, 1.51, 1.50, 1.49, 1.48, 1.38], dtype=np.float32)
+        kernel.sunglint_eps[:] = eps
+        raster = kernel.test_raster.copy(deep=True)
+        raster["bands"][:] = (0.08 * eps)[:, None, None]
+        kernel.aerosol_visible_chunk(raster, keep_xres=True)
+        np.testing.assert_allclose(kernel.xres.Rrs.isel(aot_ref=0).values, 0., atol=1e-7)

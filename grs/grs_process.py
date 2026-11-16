@@ -39,13 +39,13 @@ import dask
 
 import GRSdriver
 
-from . import utils, __version__
+from . import utils, remote, __version__
 from .config import load_config, lut_path, check_luts, ensure_luts
 from .product import Product
 from .cams import CamsProduct
 from .output import L2aProduct, quicklook_coarsen, quicklook_factor, quicklook_rgb
 from .mask import Masking
-from .grs_kernel import Kernel
+from .grs_kernel import _zero_crossing, Kernel
 from .grs_exceptions import GRS_IO_Exception
 
 opj = os.path.join
@@ -131,6 +131,19 @@ def _with_workers(method):
     return wrapper
 
 
+def _check_remote_driver(l1c_prod):
+    '''
+    Raise a clear error if the installed GRSdriver cannot read a Level-1 product from a URL.
+
+    :raises GRS_IO_Exception: without ``GRSdriver.remote``
+    '''
+    import importlib.util
+    if importlib.util.find_spec('GRSdriver.remote') is None:
+        raise GRS_IO_Exception(l1c_prod, RuntimeError(
+            f'reading a Level-1 product from a URL needs a GRSdriver version with remote reading '
+            f'(GRSdriver.remote), installed: {GRSdriver.__version__}'))
+
+
 def no_water_marker(odir):
     '''
     Path of the marker file written instead of the product for an image without water (see
@@ -139,12 +152,16 @@ def no_water_marker(odir):
     (``/data/scene.zarr`` -> ``/data/scene_no_water.txt``; a directory without extension, as given by the
     ``grs`` command, ``/data/scene`` -> ``/data/scene/scene_no_water.txt``).
 
-    :param odir: output path given to `Process.execute`
-    :return: Path, or None for a remote output (URL)
+    :param odir: output path given to `Process.execute` (local path or URL)
+    :return: Path, or URL string for a remote output
     '''
     odir = str(odir).rstrip('/')
-    if '://' in odir:
-        return None
+    if remote.is_url(odir):
+        name = remote.basename(odir)
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in _OUTPUT_EXTENSIONS:
+            return odir[:-len(name)] + stem + '_no_water.txt'
+        return remote.join(odir, name + '_no_water.txt')
     path = Path(odir)
     if path.suffix.lower() in _OUTPUT_EXTENSIONS:
         return path.with_name(path.stem + '_no_water.txt')
@@ -192,6 +209,10 @@ AEROSOL_SETTINGS = ('aot_resolution', 'min_pixel_prop', 'aot_chunk', 'outlier_fa
                     'fine_step', 'fine_window', 'aot_step')
 
 
+# optional settings (default when missing in the configuration): hybrid estimator under sunglint
+AEROSOL_OPTIONAL_SETTINGS = {'glint_aot': False, 'glint_aot_min_glint': 0.02}
+
+
 def _aerosol_settings(**overrides):
     """
     Settings of the aerosol retrieval: ``aerosol`` section of the configuration, overridden by the arguments
@@ -202,8 +223,44 @@ def _aerosol_settings(**overrides):
     if missing:
         raise KeyError(f'aerosol settings missing in the configuration: {missing}')
     settings = {key: config.get(key) for key in AEROSOL_SETTINGS}
+    settings.update({key: config.get(key, default) for key, default in AEROSOL_OPTIONAL_SETTINGS.items()})
     settings.update({key: value for key, value in overrides.items() if value is not None})
     return settings
+
+
+def _glint_hybrid_aot(aot_ref_img, min_glint):
+    """
+    Hybrid AOT of the blocks under strong sunglint.
+
+    Under sunglint the retrieval of `Kernel.aerosol_visible_chunk` keeps the top of the admissible AOT window
+    and over-estimates the AOT. The scene glint-based AOT is the AOT at which the slope of the corrected
+    visible reflectance against the sunglint, pooled over the blocks under strong sunglint (block means
+    removed: sum of ``glint_sxy`` / sum of ``glint_sxx``), crosses zero. In these blocks it replaces
+    ``aot_ref``, clipped to the admissible window ``[aot_low, aot_ref]``; the other blocks keep ``aot_ref``.
+
+    :param aot_ref_img: merged block results of `Kernel.aerosol_visible_chunk`
+    :param min_glint: strong sunglint: block median ``glint_ref`` above this value
+    :return: (aot_ref_img with the hybrid ``aot_ref``, scene glint-based AOT or None)
+    """
+    if 'glint_sxy' not in aot_ref_img:
+        return aot_ref_img, None
+    strong = (aot_ref_img.glint_ref > min_glint) & (aot_ref_img.number_of_pixel > 0) & (aot_ref_img.glint_sxx > 0)
+    if not bool(strong.any()):
+        logging.info('glint-based AOT: no block under strong sunglint, retrieval unchanged')
+        return aot_ref_img, None
+    # NaN (outside the tested values of a block) where any block is NaN: the pooled slope uses all the blocks
+    block_sxy = aot_ref_img.glint_sxy.where(strong)
+    sxy = block_sxy.sum(['y', 'x']).where(block_sxy.notnull().sum(['y', 'x']) == int(strong.sum()))
+    slope = sxy / float(aot_ref_img.glint_sxx.where(strong).sum())
+    aot_glint = _zero_crossing(slope.aot_grid.values, slope.values)
+    if not np.isfinite(aot_glint):
+        logging.info('glint-based AOT: no crossing of the pooled slope (%d blocks), retrieval unchanged',
+                     int(strong.sum()))
+        return aot_ref_img, None
+    low = aot_ref_img.aot_low.fillna(0.)
+    hybrid = np.minimum(np.maximum(aot_glint, low), aot_ref_img.aot_ref)
+    logging.info('glint-based AOT %.3f, applied to %d blocks under strong sunglint', aot_glint, int(strong.sum()))
+    return aot_ref_img.assign(aot_ref=aot_ref_img.aot_ref.where(~strong, hybrid)), aot_glint
 
 
 class Process:
@@ -248,12 +305,15 @@ class Process:
                 fine_step=None,
                 fine_window=None,
                 aot_step=None,
+                glint_aot=None,
+                glint_aot_min_glint=None,
                 scale_aot=1,
                 opac_model=None,
                 allpixels=False,
                 snap_compliant=False,
                 provide_kernel=False,
-                min_water_area=None
+                min_water_area=None,
+                storage_options=None
                 ):
 
         '''
@@ -267,7 +327,10 @@ class Process:
         section of the configuration (see :py:func:`grs.config.load_config`): None takes the value of the
         configuration, another value overrides it.
 
-        :param l1c_prod: xarray L1C object or L1C input file (path) to be processed
+        :param l1c_prod: xarray L1C object or L1C input file (path) to be processed. The files (Level-1, CAMS,
+            SURFWATER, DEM) can be local paths or URLs (``s3://``, ``https://``..., see :mod:`grs.remote`): the
+            Level-1 bands are read in place by GRSdriver (needs GRSdriver with remote reading,
+            ``GRSdriver.remote``), the other files are copied once into a local cache
         :param odir: Output path, see `write_output` (``.zarr`` / ``.nc`` extension tells the format)
         :param cams_file: CAMS file of the image (global daily or monthly file, or file of the area); None:
             taken from (or downloaded into) the ``YYYY/MM/DD`` archive of ``path: cams`` of the
@@ -280,6 +343,8 @@ class Process:
             the Zarr output. A block needs ~150 MB (512) or ~600 MB (1024) per thread.
         :param aot_resolution: pixel size (meter) of the coarse raster of the aerosol retrieval, e.g. 60, 120,
             240 (default), 480; must be a multiple of ``resolution``
+        :param storage_options: fsspec options of the remote input files (e.g. ``key``, ``secret``,
+            ``endpoint_url`` for S3); default: the environment (``AWS_PROFILE``, ``AWS_ENDPOINT_URL``...)
         :param aot_chunk: size (pixels, on the coarse raster) of the blocks of the aerosol retrieval; one AOT
             value is retrieved per block of ``aot_chunk * aot_resolution`` meters (default 64: 15 km at 240 m)
         :param aot_smoothing_blocks: size, in blocks, of the window of the weighted mean of the block AOT values
@@ -293,6 +358,9 @@ class Process:
         :param fine_window: size (cells of this grid) of the NaN-mean window of this smoothing; None in the
             configuration: about one block (default)
         :param aot_step: AOT step of the look-up tables of the final processing (default 0.01)
+        :param glint_aot: hybrid AOT under strong sunglint (see `_glint_hybrid_aot`; default False)
+        :param glint_aot_min_glint: strong sunglint: median sunglint reflectance of the reference band of a block
+            above this value (default 0.02)
         :param scale_aot: scaling factor applied to CAMS aod550 raster
         :param opac_model: If set force OPAC aerosol model for LUT interpolation (taken from CAMS data otherwise)
         :param allpixels: if True process all pixels (no water and cloud masking); otherwise only the clear-sky
@@ -303,7 +371,9 @@ class Process:
             after reading the image, sets ``self.no_water`` and returns None, and ``write_output`` writes
             the marker file `no_water_marker` instead of the product. None: ``settings: min_water_area`` of
             the configuration (1 km²); 0: stop only without any water pixel. Not used with `allpixels`.
-        :return: the kernel (None if the image has no water)
+            The processing stops in the same way (``self.no_water``, None returned, marker file) when no
+            clear-sky water pixel is left after the cloud masking (water entirely under clouds).
+        :return: the kernel (None if the image has no water or no clear-sky water pixel)
 
         Examples
         --------
@@ -403,16 +473,21 @@ class Process:
         # Get image data
         ##################################
         if isinstance(l1c_prod, str | PathLike):
-            # get extension
-            extension = Path(l1c_prod).suffix
-            basename = Path(l1c_prod).stem
+            # get extension (of a local path or of a URL)
+            name = remote.basename(l1c_prod)
+            extension = Path(name).suffix
+            basename = Path(name).stem
+            if remote.is_url(l1c_prod) and 'nc' not in extension:
+                _check_remote_driver(l1c_prod)
+            driver_kwargs = {'storage_options': storage_options} if remote.is_url(l1c_prod) else {}
             if 'nc' in extension:
                 logging.info('pass netcdf image as grs product object')
-                prod = Product(xr.open_dataset(l1c_prod, engine=NETCDF_ENGINE))
+                prod = Product(xr.open_dataset(remote.local_file(l1c_prod, storage_options), engine=NETCDF_ENGINE))
             elif 'SAFE' in extension:
                 logging.info('Open L1C Sentinel 2 image and compute angle parameters')
                 try:
-                    l1c = GRSdriver.Sentinel2Driver(l1c_prod, resolution=resolution, lazy_geom=True)
+                    l1c = GRSdriver.Sentinel2Driver(str(l1c_prod), resolution=resolution, lazy_geom=True,
+                                                    **driver_kwargs)
                     l1c.load_product()
                 except Exception as exc:
                     raise GRS_IO_Exception(l1c_prod, exc)
@@ -424,7 +499,7 @@ class Process:
             elif ('LC09_L1' in basename) or ('LC08_L1' in basename):
                 logging.info('Open L1TP Landsat image')
                 try:
-                    l1c = GRSdriver.LandsatDriver(l1c_prod, resolution=resolution)
+                    l1c = GRSdriver.LandsatDriver(str(l1c_prod), resolution=resolution, **driver_kwargs)
                     l1c.load_mask()
                     l1c.load_product()
                 except Exception as exc:
@@ -471,7 +546,7 @@ class Process:
         logging.info('get CAMS auxilliary data')
         try:
             if cams_file:
-                cams = CamsProduct(prod.raster, cams_file=cams_file)
+                cams = CamsProduct(prod.raster, cams_file=remote.local_file(cams_file, storage_options))
             else:
                 cams = _cams_from_archive(prod.raster, self.cams_dir)
             cams.load(daily_stats=False)
@@ -487,7 +562,7 @@ class Process:
         if surfwater_file:
             try:
                 logging.info('loading surfwater data file')
-                prod.raster['surfwater'] = rio.open_rasterio(surfwater_file
+                prod.raster['surfwater'] = rio.open_rasterio(remote.local_file(surfwater_file, storage_options)
                                                              ).astype(np.uint8
                                                                       ).squeeze().interp(x=prod.x,
                                                                                          y=prod.y,
@@ -598,22 +673,29 @@ class Process:
             prod.raster['sza'] = prod.raster['sza'].where(mask)
             del bands
 
+            # stop if no clear-sky water pixel is left (e.g. water entirely under clouds): nothing to process,
+            # and the angle tables of the LUT preparation would be empty. Same outcome as an image without
+            # water (min_water_area): self.no_water, None returned, marker file written by write_output
+            n_clear = int(mask.sum())
+            if n_clear == 0:
+                logging.warning('no clear-sky water pixel (water under clouds or cloud shadows), '
+                                'image not processed')
+                self.no_water = True
+                self.no_water_info = {'image': str(prod.raster.attrs.get('product_name', l1c_prod)
+                                                   if isinstance(l1c_prod, xr.Dataset) else l1c_prod),
+                                      'reason': 'no clear-sky water pixel',
+                                      'clear_water_pixels': 0}
+                return None
+
         # the band selections are views of the bands: release them now rather than at the end of execute
         del vis, nir, swir, swir2
-
-            # TODO @Thales check if it is in agreement with your policy (here stop if no water pixel and return empty object)
-            # stop process if no valid (water) pixel available
-            # if np.isnan(prod.raster['sza'].values).all():
-            #    logging.info('no water pixels, stop process')
-            #    return
-            # END TODO
 
         ######################################
         # get DEM information
         ######################################
         if dem_file:
             logging.info('load dem')
-            dem = xr.open_dataset(dem_file).squeeze().interp(y=prod.raster.y,
+            dem = xr.open_dataset(remote.local_file(dem_file, storage_options)).squeeze().interp(y=prod.raster.y,
                                                              x=prod.raster.x,
                                                              method='nearest')
             dem = dem.rename_vars({'band_data': 'dem'})
@@ -702,7 +784,8 @@ class Process:
         aerosol = _aerosol_settings(aot_resolution=aot_resolution, aot_chunk=aot_chunk,
                                     aot_smoothing_blocks=aot_smoothing_blocks, min_pixel_prop=min_pixel_prop,
                                     outlier_factor=outlier_factor, fine_step=fine_step, fine_window=fine_window,
-                                    aot_step=aot_step)
+                                    aot_step=aot_step, glint_aot=glint_aot,
+                                    glint_aot_min_glint=glint_aot_min_glint)
         logging.info('aerosol retrieval settings: %s', aerosol)
         aot_resolution, aot_chunk = aerosol['aot_resolution'], aerosol['aot_chunk']
 
@@ -737,6 +820,9 @@ class Process:
                 res.append(res_)
 
         kernel.aot_ref_img = xr.merge(res)
+        if aerosol['glint_aot']:
+            kernel.aot_ref_img, kernel.aot_glint = _glint_hybrid_aot(kernel.aot_ref_img,
+                                                                     aerosol['glint_aot_min_glint'])
         aot_ref_img = kernel.aot_ref_img
 
         logging.info('smoothing aerosol optical thickness raster')
@@ -874,10 +960,9 @@ class Process:
             if self.no_water:
                 # image without water (see min_water_area): a marker file instead of the product
                 marker = no_water_marker(self.odir)
-                if marker is not None:
-                    marker.parent.mkdir(parents=True, exist_ok=True)
-                    marker.write_text(''.join(f'{key}: {value}\n' for key, value in
-                                              {**self.no_water_info, 'grs_version': __version__}.items()))
+                remote.write_text(marker, ''.join(f'{key}: {value}\n' for key, value in
+                                                  {**self.no_water_info, 'grs_version': __version__}.items()),
+                                  storage_options=export_kwargs.get('storage_options'))
                 logging.warning('image without water: no L2A product, marker %s', marker)
                 return marker
             logging.warning('no L2A product to write (execute did not complete)')

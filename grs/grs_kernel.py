@@ -199,6 +199,19 @@ from scipy import ndimage
 from .config import load_config
 from .utils import AuxData, Rasterization, GaseousTransmittance, Misc
 
+
+def _interp_wl_loglog(da, wl, method='quadratic'):
+    '''Interpolation of the radiance tables in wavelength, in log(value) vs log(wavelength): the radiances
+    vary as a power law of the wavelength, so this is far more accurate than in linear space on the coarse
+    wavelength grid of the LUT (leave-one-out test on the OSOAA LUT: ~1 % instead of ~10 % between 400 and
+    800 nm). Non-positive values (where log is not defined) fall back to the interpolation in linear space.'''
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log = np.log(da).assign_coords(wl=np.log(da.wl))
+        out = np.exp(log.interp(wl=np.log(wl), method=method))
+    if not isinstance(wl, xr.DataArray):  # with a DataArray, the output coordinates are those of ``wl``
+        out = out.assign_coords(wl=np.asarray(wl))
+    return out.fillna(da.interp(wl=wl, method=method))
+
 # --------------------------------------------------
 # settings of the configuration (see grs.config)
 # --------------------------------------------------
@@ -327,6 +340,11 @@ class _NegativeCounter:
         '''Number of negative pixels per added ``aot_ref`` (int64 array).'''
         return np.asarray(self._counts, dtype=np.int64)
 
+    @property
+    def valid(self):
+        '''Valid pixels (bool array (y, x), defined by the first ``add``), None before it.'''
+        return self._valid
+
 
 def _aot_ref_candidates(aot_refs, counts, rel_thresh):
     '''
@@ -338,6 +356,32 @@ def _aot_ref_candidates(aot_refs, counts, rel_thresh):
     :return: array of the ``aot_ref`` whose count is below ``rel_thresh * counts.max()``
     '''
     return np.asarray(aot_refs)[counts < counts.max() * rel_thresh]
+
+
+# AOT grid of the slopes against the sunglint (``glint_sxy``) returned by the blocks of aerosol_visible_chunk:
+# the same for all the blocks, whose tested values differ, so that the driver can sum them
+GLINT_AOT_GRID = np.round(np.arange(0, 1.0001, 0.005), 3)
+
+
+def _zero_crossing(aot_refs, slopes):
+    '''
+    First ``aot_ref`` at which the slope of the reflectance against the sunglint goes from negative to positive.
+
+    Under sunglint the slope increases with the AOT: a low AOT removes too much sunglint from the visible bands
+    (negative slope), a high AOT not enough (positive slope).
+
+    :param aot_refs: tested ``aot_ref`` values (increasing)
+    :param slopes: slope for each of them (NaN skipped)
+    :return: ``aot_ref`` of the crossing, linearly interpolated, or NaN without crossing
+    '''
+    aot_refs, slopes = np.asarray(aot_refs, dtype=float), np.asarray(slopes, dtype=float)
+    ok = np.isfinite(slopes)
+    aot_refs, slopes = aot_refs[ok], slopes[ok]
+    up = np.nonzero((slopes[:-1] < 0) & (slopes[1:] >= 0))[0]
+    if len(up) == 0:
+        return np.nan
+    i = up[0]
+    return float(aot_refs[i] - slopes[i] * (aot_refs[i + 1] - aot_refs[i]) / (slopes[i + 1] - slopes[i]))
 
 
 @njit
@@ -446,16 +490,28 @@ class Kernel():
 
     def _Rdiff_tables(self, aot_refs):
         '''
-        Diffuse light LUT as a numpy array and the indices of the nearest ``aot_ref`` of each value, for the
-        loops of the aerosol retrievals (same tables as ``Rdiff_lut.sel(aot_ref=value, method='nearest')``).
+        Diffuse light LUT at each value of `aot_refs`, as a numpy array, for the loops of the aerosol
+        retrievals: linear interpolation between the two neighbouring ``aot_ref`` nodes of ``Rdiff_lut``
+        (same tables as ``Rdiff_lut.interp(aot_ref=value)``, clipped to the range of the LUT).
+
+        The tested values are not on the nodes of the LUT; the nearest node used before shifted the diffuse
+        light by up to half a node step relative to the direct transmittance, which is computed at the exact
+        value, and gave spurious jumps of the number of negative pixels from one tested value to the next.
 
         :param aot_refs: AOT values at the reference wavelength
-        :return: ``(values, indices)``: array (aot_ref, wl, sza, vza, azi) and integer array, one index per
-            value of `aot_refs`
+        :return: ``(values, indices)``: array (len(aot_refs), wl, sza, vza, azi) and the integer array
+            ``0 .. len(aot_refs) - 1`` (index of the table of each value)
         '''
         lut = self.Rdiff_lut.transpose('aot_ref', 'wl', 'sza', 'vza', 'azi')
-        indices = lut.indexes['aot_ref'].get_indexer(np.asarray(aot_refs, dtype=float), method='nearest')
-        return lut.values, indices
+        nodes = lut.aot_ref.values.astype(float)
+        table = lut.values
+        aot_refs = np.clip(np.asarray(aot_refs, dtype=float), nodes[0], nodes[-1])
+        upper = np.clip(np.searchsorted(nodes, aot_refs, side='right'), 1, len(nodes) - 1)
+        lower = upper - 1
+        frac = (aot_refs - nodes[lower]) / (nodes[upper] - nodes[lower])
+        frac = frac.reshape((-1,) + (1,) * (table.ndim - 1))
+        values = (1. - frac) * table[lower] + frac * table[upper]
+        return values.astype(table.dtype, copy=False), np.arange(len(aot_refs))
 
     @staticmethod
     def _load_block(raster, variables):
@@ -653,14 +709,14 @@ class Kernel():
         # ----------------------------------------
         # interpolation Rayleigh
         # ----------------------------------------
-        self.Rray = (Rray_ang.interp(wl=self.wl_true, method='quadratic') /
+        self.Rray = (_interp_wl_loglog(Rray_ang, self.wl_true) /
                      np.cos(np.radians(Rray_ang.sza)))
 
         # ----------------------------------------
         # interpolation atmo diffuse light
         # ----------------------------------------
         self.Rdiff_lut = Rdiff_ang.interp(aot_ref=aot_refs, method='quadratic')
-        self.Rdiff_lut = (self.Rdiff_lut.interp(wl=self.wl_true, method='quadratic') /
+        self.Rdiff_lut = (_interp_wl_loglog(self.Rdiff_lut, self.wl_true) /
                           np.cos(np.radians(self.Rdiff_lut.sza)))
 
         # ----------------------------------------
@@ -977,7 +1033,7 @@ class Kernel():
         if Ny == 0 or Nx == 0:
             return
 
-        # LUT of each aot_ref (nearest) taken with numpy: the xarray selections cost more than the retrieval
+        # LUT of each aot_ref (linear in aot_ref) taken with numpy: the xarray selections cost more than the retrieval
         Rdiff_values, iaots = self._Rdiff_tables(aot_refs)
 
         _pressure = self._surface_pressure.interp(x=raster.x, y=raster.y).values
@@ -1033,7 +1089,9 @@ class Kernel():
                               # aot_refs=[0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8],
                               iwl_swir=[-2, -1],
                               neg_pix_rel_thresh=0.05,
-                              keep_xres=False
+                              keep_xres=False,
+                              glint_wls=(560, 665),
+                              min_glint_pixels=10
                               ):
         r'''
         AOT retrieval from the visible-NIR bands, on one block (use with ``xr.map_blocks`` / ``dask.delayed``).
@@ -1062,8 +1120,7 @@ class Kernel():
            \qquad
            R_{rs}^{TOA}(\lambda; \tau_{ref}) = \frac{R_{corr}(\lambda) - R_g(\lambda)}{\pi}
 
-        (for a mono-view sensor, :math:`R_f(\lambda_s)` is not multiplied by
-        :math:`\varepsilon(\lambda_r) P_{slope}(\lambda_r)`). The negative pixels are counted on the first
+        (for a mono-view sensor :math:`P_{slope}` is the same for all the bands and cancels out). The negative pixels are counted on the first
         seven bands :math:`\Lambda_7`:
 
         .. math::
@@ -1077,6 +1134,14 @@ class Kernel():
 
         with :math:`\eta` = ``neg_pix_rel_thresh``.
 
+        Under sunglint the reflectance of the red/NIR bands increases with :math:`\tau_{ref}` (less sunglint
+        is removed): the admissible values form a window whose top is bounded by the blue/green water signal
+        only, and :math:`\hat\tau_{ref}` over-estimates the AOT. For the hybrid estimator of
+        ``Process.execute`` (``glint_aot``), the block also gives, for the bands ``glint_wls``, the slope of
+        :math:`R_{rs}^{TOA}(\lambda; \tau_{ref})` against the sunglint of the reference band
+        :math:`R_g(\lambda_r)` over the valid pixels; ``aot_glint`` is the :math:`\tau_{ref}` at which the
+        mean slope crosses zero (the corrected reflectance no longer depends on the sunglint).
+
         The block only reads ``self.aot_ref_max`` (set by ``aerosol_swir_chunk``); it does not modify the
         instance, so blocks are independent of each other and of the order or the threads they run in.
 
@@ -1086,8 +1151,21 @@ class Kernel():
         :param neg_pix_rel_thresh: accepted fraction of negative pixels
         :param keep_xres: keep the reflectance of every ``aot_ref`` in ``self.xres`` (debugging; 21 full
             blocks, not thread safe)
-        :return: Dataset with one pixel (y, x = block centre): ``aot_ref`` and ``number_of_pixel`` (number
-            of water pixels of the block), or None for an empty block
+        :param glint_wls: wavelengths (nm, nearest bands) of the slopes against the sunglint
+        :param min_glint_pixels: fewer valid pixels: no slope
+        :return: Dataset with one pixel (y, x = block centre), or None for an empty block:
+
+            * ``aot_ref``: retrieved AOT (largest admissible value, or CAMS);
+            * ``number_of_pixel``: number of water pixels of the block;
+            * ``aot_low``: smallest admissible value (NaN if none);
+            * ``aot_glint``: zero crossing of the slope against the sunglint (NaN if none);
+            * ``glint_ref``: median sunglint :math:`R_g(\lambda_r)` of the valid pixels at
+              :math:`\tau_{ref} = 0`;
+            * ``glint_sxx``: sum of its squared deviations;
+            * ``glint_sxy`` (dimension ``aot_grid``, ``GLINT_AOT_GRID``): sum of the products of the deviations of
+              the sunglint and of :math:`R_{rs}^{TOA}`, mean over ``glint_wls``, interpolated from the tested
+              values to the grid (NaN outside them); summed over blocks, it gives the slope of the scene with
+              the block means removed.
         '''
         ##############################################
         # Estimate AOT from visible-NIR
@@ -1147,6 +1225,10 @@ class Kernel():
 
         counter = _NegativeCounter(base_threshold=-0.0003)
         xres = []
+        wl_values = np.asarray(raster.wl.values, dtype=float)
+        iglint = [int(np.argmin(np.abs(wl_values - w))) for w in glint_wls]
+        glint_slopes = np.full((len(aot_refs), len(iglint)), np.nan)
+        glint_ref, glint_sxx = np.nan, 0.
         for i, _aot_ref in enumerate(aot_refs):
             arr_tmp = np.full((Nwl, Ny, Nx), np.nan, dtype=np.float32)
 
@@ -1165,10 +1247,12 @@ class Kernel():
             # direct transmittance up/down
             Tdir = np.exp(-aot_rot[i] * _air_mass_)
 
+            # sunglint of the reference band lambda_r estimated in each SWIR band (for a mono-view sensor the slope
+            # probability is the same for all the bands and cancels out)
             Rf = np.full((len(iwl_swir), Ny, Nx), np.nan, dtype=np.float32)
             for iwl in iwl_swir:
                 if monoview:
-                    Rf[iwl] = Rcorr[iwl] / (Tdir[iwl] * _Tg_abs[iwl] * sunglint_eps[iwl] * _p_slope_)
+                    Rf[iwl] = sunglint_eps[-1] * Rcorr[iwl] / (_Tg_abs[iwl] * Tdir[iwl] * sunglint_eps[iwl])
                 else:
                     Rf[iwl] = (sunglint_eps[-1] * _p_slope_[-1] * Rcorr[iwl])
                     Rf[iwl] = Rf[iwl] / (
@@ -1187,6 +1271,19 @@ class Kernel():
             Rrs_toa = np.asarray((Rcorr - Rf) / np.pi)
 
             counter.add(Rrs_toa, nwl=7)
+
+            # slope of the corrected reflectance against the sunglint of the reference band (valid pixels)
+            glint = Rf[-1]
+            sel = counter.valid & np.isfinite(glint) & np.all(np.isfinite(Rrs_toa[iglint]), axis=0)
+            if np.count_nonzero(sel) >= min_glint_pixels:
+                g = glint[sel].astype(float)
+                dg = g - g.mean()
+                sxx = float(dg @ dg)
+                if sxx > 0:
+                    glint_slopes[i] = [float(Rrs_toa[k][sel] @ dg) / sxx for k in iglint]
+                if i == 0:
+                    glint_ref, glint_sxx = float(np.median(g)), sxx
+
             if keep_xres:
                 xres.append(xr.Dataset(dict(Rrs=(['wl', "y", "x"], Rrs_toa)),
                                        coords=dict(wl=raster.wl, x=raster.x, y=raster.y, aot_ref=_aot_ref)))
@@ -1197,13 +1294,29 @@ class Kernel():
         aot_ref_maxs = _aot_ref_candidates(aot_refs, counter.counts, neg_pix_rel_thresh)
         if len(aot_ref_maxs) > 0:
             aot_ref_max = aot_ref_maxs[-1]
+            aot_low = aot_ref_maxs[0]
         else:
             aot_ref_max = self._cams_aod550.interp(x=raster.x, y=raster.y).mean(['y', 'x']).values
+            aot_low = np.nan
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)  # all-NaN rows
+            mean_slope = np.nanmean(glint_slopes, axis=1)
+        aot_glint = _zero_crossing(aot_refs, mean_slope)
+        ok = np.isfinite(mean_slope)
+        if np.count_nonzero(ok) >= 2:
+            glint_sxy = np.interp(GLINT_AOT_GRID, aot_refs[ok], mean_slope[ok] * glint_sxx, left=np.nan, right=np.nan)
+        else:
+            glint_sxy = np.full(len(GLINT_AOT_GRID), np.nan)
 
         number_of_pixel = raster.water_pixel_number.sum(['y', 'x']).values
+        one = lambda v: (["y", "x"], np.array([[v]], dtype=float))
         retrieved_aot = xr.Dataset({'aot_ref': (["y", "x"], np.array([[aot_ref_max]])),
-                                    'number_of_pixel': (["y", "x"], np.array([[number_of_pixel]]))},
-                                   coords=dict(y=[raster.y.mean().values], x=[raster.x.mean().values]))
+                                    'number_of_pixel': (["y", "x"], np.array([[number_of_pixel]])),
+                                    'aot_low': one(aot_low), 'aot_glint': one(aot_glint),
+                                    'glint_ref': one(glint_ref), 'glint_sxx': one(glint_sxx),
+                                    'glint_sxy': (["aot_grid", "y", "x"], glint_sxy.reshape(-1, 1, 1))},
+                                   coords=dict(y=[raster.y.mean().values], x=[raster.x.mean().values],
+                                               aot_grid=GLINT_AOT_GRID))
 
         return retrieved_aot
 
@@ -1243,7 +1356,7 @@ class Kernel():
            \end{cases}
 
            R_g(\lambda) = T_g(\lambda)\, T_{dir}(\lambda)\, \varepsilon(\lambda)\, P_{slope}(\lambda)\,
-           \frac{R_f}{\varepsilon(\lambda_s)\, P_{slope}(\lambda_s)}
+           \frac{R_f}{\varepsilon(\lambda_r)\, P_{slope}(\lambda_r)}
 
         and the remote-sensing reflectance is
 
@@ -1260,16 +1373,9 @@ class Kernel():
 
         ``BRDFg`` is :math:`R_f` and ``aot550`` is :math:`\tau_{ref}`.
 
-        Note: :math:`R_f'` is normalised with :math:`\lambda_r` (last band) but :math:`R_g` with
-        :math:`\lambda_s`, so that (without clipping)
-
-        .. math::
-
-           R_g(\lambda_s) = R_{corr}(\lambda_s)\,
-           \frac{\varepsilon(\lambda_r)\, P_{slope}(\lambda_r)}{\varepsilon(\lambda_s)\, P_{slope}(\lambda_s)}
-
-        which differs from :math:`R_{corr}(\lambda_s)` unless the two products are equal
-        (`aerosol_visible_chunk` uses :math:`\lambda_r` for both).
+        so that (without clipping) the glint removed in the SWIR band is :math:`R_g(\lambda_s) = R_{corr}(\lambda_s)`,
+        as in `aerosol_visible_chunk`, for multi-view and mono-view sensors (for the latter :math:`P_{slope}` is
+        the same for all the bands and cancels out).
 
         The wind map ``self.wind_img`` is interpolated to the block; the coarse maps (surface pressure,
         gaseous transmittance, `aot_ref_raster`) are interpolated to the block grid. Nothing is stored on
@@ -1392,10 +1498,12 @@ class Kernel():
             Ttot_du = Tdown
             del Tup
 
+            # sunglint of the reference band lambda_r estimated in the SWIR bands, as in aerosol_visible_chunk (for a
+            # mono-view sensor the slope probability is the same for all the bands and cancels out)
             Rf = np.full((len(iwl_swir), Ny, Nx), np.nan, dtype=np.float32)
             for iwl in iwl_swir:
                 if monoview:
-                    Rf[iwl] = Rcorr[iwl] / (Tdir[iwl] * _Tg_raster[iwl] * sunglint_eps[iwl] * _p_slope_)
+                    Rf[iwl] = sunglint_eps[-1] * Rcorr[iwl] / (_Tg_raster[iwl] * Tdir[iwl] * sunglint_eps[iwl])
                 else:
                     Rf[iwl] = (sunglint_eps[-1] * _p_slope_[-1] * Rcorr[iwl])
                     Rf[iwl] = Rf[iwl] / (
@@ -1412,11 +1520,12 @@ class Kernel():
             Rf = _R_._multiplicate(sunglint_eps, Rf, arr_tmp)
             # slope probability of the reference band: (y, x) for monoview sensors, the same for all the bands
             # (indexing it would take a row of the block)
-            _p_slope_ref = _p_slope_ if monoview else _p_slope_[-2]
+            # same normalisation as Rf above and as aerosol_visible_chunk (sunglint_eps[-1] * p_slope[-1])
+            _p_slope_ref = _p_slope_ if monoview else _p_slope_[-1]
             Rf = Rf * _Tg_raster
             Rf *= Tdir
             Rf *= _p_slope_
-            Rf /= (sunglint_eps[-2] * _p_slope_ref).astype(np.float32)
+            Rf /= (sunglint_eps[-1] * _p_slope_ref).astype(np.float32)
             del Tdir, _p_slope_
 
             # sunglint removal

@@ -9,6 +9,13 @@ Dates are given for tagged releases only.
 ## [Unreleased] - 3.1.1
 
 ### Added
+- Inputs and outputs on object storage (S3 or S3-compatible) or web servers (issue #11): the Level-1 product, the
+  CAMS, DEM and SURFWATER files, the output (`--odir`, Zarr) and the configuration file (`GRS_CONFIG`) can be
+  URLs (`s3://`, `https://`...), in `Process.execute` (`storage_options` argument), the `grs` command and
+  `exe/launcher.py`. New module `grs.remote`: URL helpers on fsspec, credentials from the AWS environment; the
+  Level-1 bands are read in place by GRSdriver (needs its remote reading, `GRSdriver.remote`), the other input
+  files are copied once into a local cache (`GRS_CACHE_DIR`). The no-water marker is also written for a remote
+  output. `grs --log_dir`: local folder of the log files, copied next to a remote product at the end.
 - Images without water are not processed: `Process.execute` stops right after reading the image (no CAMS,
   cloud mask, LUTs nor aerosol retrieval) when the water test of the processing finds less water than
   `min_water_area` (km², `settings: min_water_area` of the configuration, default 1 km²; argument of
@@ -16,6 +23,11 @@ Dates are given for tagged releases only.
   the product, `write_output` writes the marker file `<name>_no_water.txt` (image, water area, minimum,
   version), skipped like a product by `grs --no_clobber` and by the batch tutorial (status `no_water`).
   Not used with `allpixels`.
+- Hybrid aerosol retrieval under sunglint (opt-in, `aerosol: glint_aot` of the configuration or `glint_aot`
+  argument of `execute`, default off): `Kernel.aerosol_visible_chunk` also returns the slopes of the visible
+  Rrs (560, 665 nm) against the glint for a grid of AOT; pooled over the blocks under strong glint
+  (`glint_aot_min_glint`, default 0.02), their zero crossing gives an AOT clipped to the admissible window
+  of the retrieval. Removes most of the glint stripes due to the over-estimated AOT on glinted scenes.
 - Unit tests of the `Kernel` retrievals (`grs/tests/unit/kernel/`: LUT preparation, coarse rasters, wind,
   SWIR and visible aerosol, final processing), of the masking, output product, configuration, command line,
   exceptions and utilities (from `develop`, PR #24 and #26).
@@ -24,6 +36,11 @@ Dates are given for tagged releases only.
   release/hotfix/bugfix branches, documentation published on tags; `notebooks` extra in `pyproject.toml`.
 
 ### Changed
+- Requires GRSdriver >= 2.1.1 (was 2.0.4): 2.1 is the first version reading the Level-1 products in place from
+  a bucket (`GRSdriver.remote`), used by the URL inputs above; 2.1.1 gives the Landsat relative azimuth in the
+  convention of Sentinel-2 (`(vaa - saa) % 360`), needed by the Landsat sunglint fix below.
+- `grs`: `error.log` is written next to `log_file.log` in the output folder (was the current folder, where
+  the runs started from the same folder overwrote each other's error log).
 - Faster processing, same products (bit-identical L2A on a Sentinel-2 tile; `execute` about 295 s ->
   150 s on the Loire tile at 20 m):
   - CAMS NetCDF3 files (monthly global files `cams_forecast_YYYY-MM.nc`) read with the xarray `scipy`
@@ -50,6 +67,20 @@ Dates are given for tagged releases only.
   and GRSdriver >= 2.0.4 (no EOReader, sertit, fiona). The processing code of 3.1.1 is kept.
 
 ### Fixed
+- Images whose water is entirely under clouds (no clear-sky water pixel after the cloud masking) crashed in
+  `Kernel.lut_preparation` (`ValueError: zero-size array to reduction operation fmin`, empty angle tables):
+  `Process.execute` now logs a warning and stops like an image without water (`no_water`, None returned,
+  marker file written by `write_output`, with the reason `no clear-sky water pixel`).
+- Sunglint removal of the multi-view sensors (Sentinel-2), `Kernel.final_process_chunk`: the glint estimated
+  in the SWIR was normalised with `sunglint_eps` and `p_slope` of the last band (2190 nm) but propagated to
+  the other bands with those of the 1610 nm band, so that only ε(2190)/ε(1610) ≈ 0.89 of the glint was
+  removed in every band (regression of 3.0, 2.2.1 was consistent). On a glinted Sentinel-2 scene the
+  residual glint was ~3e-3 sr-1 at 1610 nm and ~2e-3 sr-1 in the green. Unit test on a glint-only scene
+  (Rrs = 0).
+- Sunglint removal of the monoview sensors (Landsat), `Kernel.aerosol_visible_chunk` and
+  `Kernel.final_process_chunk`: the glint was divided twice by `sunglint_eps`; same normalisation as
+  Sentinel-2. On a glinted Landsat 8 scene, the residual Rrs(1610) drops from 2.6e-3 to 0 sr-1 and the
+  retrieved AOT from 0.17 to 0.05 (CAMS 0.07).
 - Thread-safe numba threading layer by default (`NUMBA_THREADING_LAYER=threadsafe`: TBB, else OpenMP,
   unless set by the user): the fallback `workqueue` layer aborted the process on the concurrent calls of
   the numba kernels from the dask threads.
@@ -60,6 +91,12 @@ Dates are given for tagged releases only.
   first NaN) instead of the smallest valid cost, giving a NaN cost and a wrong wind on the pixels where
   only some wind candidates have a valid cost.
 - Configuration tests no longer read the user file of the computer (`~/.config/grs/config.yml`).
+- Exit status of `grs` and of `exe/launcher.py` (issue #13): a processing error ended with status 0, so that the
+  processing chains went on to the Level-2B with no Level-2A product. The status is now 0 when the product is
+  written (or already there with `--no_clobber`), 1 for a processing error, 2 for invalid arguments or a missing /
+  unreadable input (was -1, i.e. 255), 3 for an image skipped on purpose without product (cloud cover, no water,
+  was 0). `grs.run.main` returns it (`argv` argument for tests) and closes its log files; the `--no_clobber` check of
+  the launcher also finds the Zarr products and the no-water marker.
 
 ## [3.1.0]
 

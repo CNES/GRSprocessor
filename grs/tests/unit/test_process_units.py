@@ -313,7 +313,15 @@ class TestAerosolSettings:
 
         result = grs_process._aerosol_settings()
 
-        assert result == config
+        assert result == {**config, **grs_process.AEROSOL_OPTIONAL_SETTINGS}
+
+    def test_optional_from_config(self, monkeypatch):
+        """Optional settings of the configuration replace their defaults"""
+        config = {key: f"value_{key}" for key in grs_process.AEROSOL_SETTINGS}
+        config["glint_aot"] = True
+        monkeypatch.setattr(grs_process, "load_config", lambda: {"aerosol": config})
+
+        assert grs_process._aerosol_settings()["glint_aot"] is True
 
     def test_override(self,monkeypatch):
         config = {
