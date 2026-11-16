@@ -3,6 +3,9 @@ Writes the Sentinel-2 / AERONET-OC matchup notebook of a site, ``<site>_s2_match
 (edit the notebook here, not the .ipynb):
 
     python make_s2_matchup_nb.py [SITE]      # name of aeronet_oc_db.site_info(), default AAOT
+
+SITE can also be a platform with several AERONET-OC series (``INSITU``), e.g. ``Venise+AAOT``: the in situ records of
+all its series are merged (same coordinates).
 """
 import sys
 from pathlib import Path
@@ -10,6 +13,10 @@ from pathlib import Path
 import nbformat as nbf
 
 SITE = sys.argv[1] if len(sys.argv) > 1 else 'AAOT'
+# platforms with several AERONET-OC series (same coordinates), merged
+INSITU = {'Venise+AAOT': ['Venise', 'AAOT']}.get(SITE, [SITE])
+# period of the images: the whole Sentinel-2 record for the merged platforms, a couple of years up to now otherwise
+PERIOD = {'Venise+AAOT': ('2015-07-01', '2026-11-14')}.get(SITE, ('2024-11-14', '2026-11-14'))
 DESCRIPTION = {
     'AAOT': 'the Acqua Alta Oceanographic Tower (**AAOT**, northern Adriatic, 45.314 N, 12.508 E, tile 32TQR). '
             'Venise is the former name of the same platform, with data until 2023-03: it can be used for the '
@@ -17,15 +24,19 @@ DESCRIPTION = {
     'Section-7_Platform': 'the Section-7 platform (**Section-7_Platform**, north-western Black Sea off the Danube '
                           'delta, 44.546 N, 29.447 E, tile 35TPK). Gloria is the former platform nearby, with '
                           "data until 2019-08 (`SITE = 'Gloria'`)",
+    'Venise+AAOT': 'the Acqua Alta Oceanographic Tower (northern Adriatic, 45.314 N, 12.508 E, tile 32TQR), with the '
+                   'two AERONET-OC series of the platform merged: **Venise** (2002 to 2023-03) and **AAOT** (since '
+                   '2017-10; both instruments ran together from 2017-10 to 2023-03). Whole Sentinel-2 record',
 }
-NB_NAME = {'AAOT': 'aaot', 'Section-7_Platform': 'section7'}.get(SITE, SITE.lower())
+NB_NAME = {'AAOT': 'aaot', 'Section-7_Platform': 'section7', 'Venise+AAOT': 'venise_aaot'}.get(SITE, SITE.lower())
 
 nb = nbf.v4.new_notebook()
 C = []
 
 
 def _site(s):
-    return s.replace('__SITE__', SITE).replace('__NB__', f'{NB_NAME}_s2_matchups.ipynb')
+    return (s.replace('__SITE__', SITE).replace('__NB__', f'{NB_NAME}_s2_matchups.ipynb')
+            .replace('__INSITU__', repr(INSITU)).replace('__START__', PERIOD[0]).replace('__END__', PERIOD[1]))
 
 
 def md(s):
@@ -60,7 +71,7 @@ Steps:
    the matchups and with the Level 2.0 ones only.
 
 Long steps (3-4) the first time: run the notebook with
-`research/run_nb.sh notebook/validation/__NB__ 20000` (memory cap, see `CLAUDE.md`), or set
+`research/run_nb.sh notebook/validation/__NB__ 20000` (memory cap, see `CLAUDE.local.md`), or set
 `PROCESS = False` to only evaluate what is cached.
 ''')
 
@@ -91,9 +102,12 @@ from grstbx.matchup import matchup_metrics
 from shapely.geometry import Point, shape
 
 assert Path(grs.__file__).resolve().is_relative_to(REPO), grs.__file__
-COMMIT = subprocess.run(['git', '-C', str(REPO), 'rev-parse', '--short', 'HEAD'],
-                        capture_output=True, text=True).stdout.strip()
-VERSION = f'{grs.__version__}+{COMMIT}'
+# version of the code under test: last commit of grs/ (commits of the notebooks, docs... keep the cache);
+# '.dirty' if grs/ has uncommitted changes (results of such a run are not attached to a commit)
+GIT = ['git', '-C', str(REPO)]
+COMMIT = subprocess.run(GIT + ['log', '-1', '--format=%h', '--', 'grs'], capture_output=True, text=True).stdout.strip()
+DIRTY = subprocess.run(GIT + ['diff', '--quiet', 'HEAD', '--', 'grs']).returncode != 0
+VERSION = f'{grs.__version__}+{COMMIT}' + ('.dirty' if DIRTY else '')
 print('GRSprocessor', VERSION, '| GRSdriver', GRSdriver.__version__, '| aeronet_oc_db root', aeronet_oc_db.default_root())
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 ''')
@@ -101,7 +115,8 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 md('## Settings')
 code(r'''
 SITE = '__SITE__'
-START, END = '2024-11-14', '2026-11-14'      # period of the images (a couple of years up to now)
+INSITU_SITES = __INSITU__    # AERONET-OC series of the platform (merged when several)
+START, END = '__START__', '__END__'      # period of the images
 MAX_LAG = pd.Timedelta(hours=1)              # in situ record to overpass (Zibordi et al. 2009: +-1 h)
 SEARCH_LAG = pd.Timedelta(hours=2)           # wider lag to select the images worth processing
 MAX_CLOUD = 50                               # cloud cover of the tile (%), for the selection only
@@ -133,30 +148,36 @@ BANDS = {443: 443, 490: 490, 560: 560, 665: 667, 783: 779, 865: 865}
 
 md('## 1. In situ data')
 code(r'''
-info = aeronet_oc_db.site_info().loc[SITE]
-LON, LAT, TILE = float(info.longitude), float(info.latitude), info.s2_tile
-print(SITE, LAT, LON, TILE)
+info = aeronet_oc_db.site_info().loc[INSITU_SITES]
+assert len(info[['latitude', 'longitude', 's2_tile']].drop_duplicates()) == 1, 'series of different locations'
+LON, LAT, TILE = float(info.longitude.iloc[0]), float(info.latitude.iloc[0]), info.s2_tile.iloc[0]
+print(SITE, INSITU_SITES, LAT, LON, TILE)
 
 
-def insitu(site):
-    """Level 2.0 records, completed by the level 1.5 ones not (yet) in level 2.0 (quality 'lev15')"""
+def insitu(sites):
+    """Level 2.0 records, completed by the level 1.5 ones not (yet) in level 2.0 (quality 'lev15'), of all the
+    AERONET-OC series of the platform (`site` column)"""
     out = []
-    for level in ['lev20', 'lev15']:
-        ds = aeronet_oc_db.open_site(site, level)
-        df = ds[['Rrs_Lwn', 'Rrs_Lwn_fQ', 'aot']].to_dataframe().unstack('wl')
-        df.columns = [f'{v}_{int(w)}' for v, w in df.columns]
-        for v in ['sza', 'wind', 'chl']:
-            df[v] = ds[v].to_series()
-        df['level'] = level
-        out.append(df)
-    lev20, lev15 = out
-    df = pd.concat([lev20, lev15[~lev15.index.isin(lev20.index)]]).sort_index()
-    return df
+    for site in sites:
+        lev = []
+        for level in ['lev20', 'lev15']:
+            ds = aeronet_oc_db.open_site(site, level)
+            df = ds[['Rrs_Lwn', 'Rrs_Lwn_fQ', 'aot']].to_dataframe().unstack('wl')
+            df.columns = [f'{v}_{int(w)}' for v, w in df.columns]
+            for v in ['sza', 'wind', 'chl']:
+                df[v] = ds[v].to_series()
+            df['level'] = level
+            df['site'] = site
+            lev.append(df)
+        lev20, lev15 = lev
+        out.append(pd.concat([lev20, lev15[~lev15.index.isin(lev20.index)]]))
+    df = pd.concat(out).sort_values('level', ascending=False, kind='stable')
+    return df[~df.index.duplicated(keep='first')].sort_index()     # same time in two series: level 2.0 first
 
 
-ins = insitu(SITE)
+ins = insitu(INSITU_SITES)
 ins = ins[(ins.index >= pd.Timestamp(START) - SEARCH_LAG) & (ins.index <= pd.Timestamp(END) + SEARCH_LAG)]
-print(len(ins), 'records in the period;', ins.level.value_counts().to_dict())
+print(len(ins), 'records in the period;', ins.groupby(['site', 'level']).size().to_dict())
 ''')
 
 code(r'''
@@ -216,7 +237,9 @@ def cams_covers(path, t):
     if path not in _cams_cache:
         try:
             with xr.open_dataset(path) as ds:
-                ft = pd.to_datetime(ds.forecast_reference_time.values)
+                # new ADS layout (forecast_reference_time x forecast_period), or the older one (time, up to 2024-06)
+                ft = pd.to_datetime((ds.forecast_reference_time if 'forecast_reference_time' in ds.coords
+                                     else ds.time).values)
                 _cams_cache[path] = set(ft.normalize()) if ds.sizes['latitude'] > 100 else set()
         except (FileNotFoundError, OSError, AttributeError, KeyError):
             _cams_cache[path] = set()
@@ -329,7 +352,9 @@ Ring of pixels around the AERONET-OC coordinates, from `RING[0]` to `RING[1]` pi
 structure, a centred window is contaminated and fails the CV test). Water pixels (`mask == 0`) with a valid Rrs,
 without the platform (Rrs(865) above the median of the extraction by more than `PLATFORM_NIR`). A matchup
 is kept if at least `MIN_VALID` of the window is valid and the CV of Rrs(560) is below `MAX_CV` (Bailey and
-Werdell 2006). The in situ record is the nearest one within `MAX_LAG`. GRSprocessor gives the directional
+Werdell 2006). The in situ record is the nearest Level 2.0 one within `MAX_LAG`, else the nearest one (at
+a platform with two series, the Level 2.0 record of one instrument is preferred to a closer Level 1.5 one of the
+other). GRSprocessor gives the directional
 Rrs (no BRDF correction): it is compared with `Rrs_Lwn` (Lwn / F0, no f/Q correction); `Rrs_Lwn_fQ` is kept
 for reference.
 ''')
@@ -374,14 +399,23 @@ print(len(sat), 'cached extractions in the period;', len(list(CACHE.glob('*.err'
 if sat.empty:
     raise SystemExit('no cached extraction yet: download the images / CAMS months and run section 3')
 
-# nearest in situ record within MAX_LAG
-idx = ins.index.get_indexer(sat.time, method='nearest')
-mu = pd.concat([sat, ins.iloc[idx].reset_index().rename(columns={'time': 'time_insitu'})], axis=1)
+# nearest in situ record within MAX_LAG: the nearest Level 2.0 one if within MAX_LAG, else the nearest one
+def nearest(df):
+    return df.iloc[df.index.get_indexer(sat.time, method='nearest')].reset_index().rename(columns={'time': 'time_insitu'})
+
+
+near = nearest(ins)
+if (ins.level == 'lev20').any():
+    near20 = nearest(ins[ins.level == 'lev20'])
+    use20 = ((near20.time_insitu - sat.time).abs() <= MAX_LAG).values
+    near.loc[use20] = near20.loc[use20]
+mu = pd.concat([sat, near], axis=1)
 mu['lag_min'] = (mu.time_insitu - mu.time).dt.total_seconds() / 60
 mu['ok'] = (mu.lag_min.abs() <= MAX_LAG.total_seconds() / 60) & (mu.frac_valid >= MIN_VALID) & (mu.cv560 <= MAX_CV)
 print(f"{mu.ok.sum()} valid matchups ({(mu.ok & (mu.level == 'lev20')).sum()} with level 2.0)")
+print(mu[mu.ok].groupby(['site', 'level']).size().to_dict())
 mu.to_csv(CACHE / f'matchups_{SITE}.csv', index=False)
-mu.loc[mu.ok, ['image', 'lag_min', 'level', 'n_valid', 'cv560', 'aot550_sat', 'aot_550', 'BRDFg', 'wind_sat']].round(4)
+mu.loc[mu.ok, ['image', 'lag_min', 'site', 'level', 'n_valid', 'cv560', 'aot550_sat', 'aot_550', 'BRDFg', 'wind_sat']].round(4)
 ''')
 
 md('## 6. Evaluation')

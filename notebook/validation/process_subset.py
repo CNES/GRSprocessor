@@ -32,9 +32,11 @@ VARS = ['Rrs', 'BRDFg', 'aot550', 'mask', 'flags', 'wind', 'sza', 'vza', 'raa']
 
 
 def version():
-    commit = subprocess.run(['git', '-C', str(REPO), 'rev-parse', '--short', 'HEAD'],
-                            capture_output=True, text=True).stdout.strip()
-    return f'{grs.__version__}+{commit}'
+    """GRSprocessor version + last commit of grs/ (the code under test; '.dirty' if grs/ has uncommitted changes)"""
+    git = ['git', '-C', str(REPO)]
+    commit = subprocess.run(git + ['log', '-1', '--format=%h', '--', 'grs'], capture_output=True, text=True).stdout.strip()
+    dirty = subprocess.run(git + ['diff', '--quiet', 'HEAD', '--', 'grs']).returncode != 0
+    return f'{grs.__version__}+{commit}' + ('.dirty' if dirty else '')
 
 
 def main(argv=None):
