@@ -199,6 +199,19 @@ from scipy import ndimage
 from .config import load_config
 from .utils import AuxData, Rasterization, GaseousTransmittance, Misc
 
+
+def _interp_wl_loglog(da, wl, method='quadratic'):
+    '''Interpolation of the radiance tables in wavelength, in log(value) vs log(wavelength): the radiances
+    vary as a power law of the wavelength, so this is far more accurate than in linear space on the coarse
+    wavelength grid of the LUT (leave-one-out test on the OSOAA LUT: ~1 % instead of ~10 % between 400 and
+    800 nm). Non-positive values (where log is not defined) fall back to the interpolation in linear space.'''
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log = np.log(da).assign_coords(wl=np.log(da.wl))
+        out = np.exp(log.interp(wl=np.log(wl), method=method))
+    if not isinstance(wl, xr.DataArray):  # with a DataArray, the output coordinates are those of ``wl``
+        out = out.assign_coords(wl=np.asarray(wl))
+    return out.fillna(da.interp(wl=wl, method=method))
+
 # --------------------------------------------------
 # settings of the configuration (see grs.config)
 # --------------------------------------------------
@@ -696,14 +709,14 @@ class Kernel():
         # ----------------------------------------
         # interpolation Rayleigh
         # ----------------------------------------
-        self.Rray = (Rray_ang.interp(wl=self.wl_true, method='quadratic') /
+        self.Rray = (_interp_wl_loglog(Rray_ang, self.wl_true) /
                      np.cos(np.radians(Rray_ang.sza)))
 
         # ----------------------------------------
         # interpolation atmo diffuse light
         # ----------------------------------------
         self.Rdiff_lut = Rdiff_ang.interp(aot_ref=aot_refs, method='quadratic')
-        self.Rdiff_lut = (self.Rdiff_lut.interp(wl=self.wl_true, method='quadratic') /
+        self.Rdiff_lut = (_interp_wl_loglog(self.Rdiff_lut, self.wl_true) /
                           np.cos(np.radians(self.Rdiff_lut.sza)))
 
         # ----------------------------------------
