@@ -38,7 +38,28 @@ bit    name                            meaning
 12     ``OCM_Thin_Cloud``              OmniCloudMask thin cloud
 13     ``OCM_Cloud_Shadow``            OmniCloudMask cloud shadow
 14-20  ``l1_*``                        Landsat level-1 QA bits copied from ``flags_l1``  [Landsat only]
+21     ``snow``                        snow (or snow-covered ice), see `Snow and ice`_
+22     ``ice``                         ice (darker than snow in the green), see `Snow and ice`_
+23     ``neg_rrs``                     negative Rrs(490) or Rrs(565), set after the atmospheric correction
+                                       (:py:meth:`grs.grs_process.Process.execute`)
 =====  ==============================  ==========================================================================
+
+Snow and ice
+============
+
+Fmask-like test on the TOA reflectance R (Zhu and Woodcock 2012), with the band indices
+NDSI = (R560 - R1610) / (R560 + R1610) and NDVI = (R842 - R665) / (R842 + R665). A pixel is snow or ice when
+
+* NDSI > ``ndsi_threshold`` (0.4), R842 > ``snow_nir_min`` (0.11), R560 > ``snow_green_min`` (0.10) and
+  NDVI < ``snow_ndvi_max`` (0.1): bright in the visible and NIR, dark in the SWIR;
+* R490 > ``snow_blue_green_min`` x R560 (1.03): white to bluish. Very turbid waters pass the tests above
+  (NDSI ~0.6, R842 > 0.11) but are brown (R490 < R560); this test removes them (Rio de la Plata subsets:
+  3600 turbid pixels of 2023-11-04 down to 10, while 99.98 % of the Lake Erie ice pixels are kept);
+* the cirrus band is below ``opac_cirrus_threshold`` (cirrus is flagged as cloud, not snow).
+
+The pixels with R560 < ``ice_green_max`` (0.5) are ``ice`` (bare or wet ice, about 0.2-0.4), the brighter ones
+``snow``. Water dark in the NIR (R842 < 0.11) is never flagged. Snow and ice pixels are excluded from the
+processed water pixels (:meth:`Masking.snow_ice`) and set in ``mask``.
 
 Clear sky
 =========
@@ -88,6 +109,8 @@ except PackageNotFoundError:
 FLAG_NAME = 'flags'
 # flag bits of the OmniCloudMask classes 1 (thick cloud), 2 (thin cloud) and 3 (cloud shadow)
 OCM_BITS = (11, 12, 13)
+# flag bits of snow and ice
+SNOW_ICE_BITS = (21, 22)
 
 
 class Settings:
@@ -111,6 +134,10 @@ class Settings:
         ``water_swir_visible_index`` flag: (visible - SWIR) / (visible + SWIR) above this value.
     thin_cirrus_threshold, opac_cirrus_threshold : float
         Cirrus-band reflectance thresholds of the thin and opaque cirrus flags.
+    bgreen, bred : float
+        Green (560) and red (665) bands (nm, nearest available) of the snow and ice flags.
+    ndsi_threshold, snow_nir_min, snow_green_min, snow_ndvi_max, snow_blue_green_min, ice_green_max : float
+        Thresholds of the ``snow`` and ``ice`` flags (see the module documentation, Snow and ice).
     OCM_Rband, OCM_Gband, OCM_NIRband : float
         Red, green and NIR bands (nm, nearest available) given to OmniCloudMask.
     OCM_resolution : float or None
@@ -136,6 +163,16 @@ class Settings:
         self.vis_swir_index_threshold = 0.2
         self.thin_cirrus_threshold = 3e-3
         self.opac_cirrus_threshold = 9e-3
+
+        # snow and ice (TOA reflectance)
+        self.bgreen = 560
+        self.bred = 665
+        self.ndsi_threshold = 0.4
+        self.snow_nir_min = 0.11
+        self.snow_green_min = 0.10
+        self.snow_ndvi_max = 0.1
+        self.snow_blue_green_min = 1.03
+        self.ice_green_max = 0.5
 
         # settings OmniCloudMask
         self.OCM_Rband = 665
@@ -478,6 +515,44 @@ class Masking(Settings):
 
         return _Step(fn, [icirrus], 0, ())
 
+    def _snow_ice_step(self,
+                       bitmasks=SNOW_ICE_BITS,
+                       names=('snow', 'ice'),
+                       descriptions=('snow (or snow-covered ice)', 'ice')):
+        '''Step: snow and ice, Fmask-like NDSI test with a whiteness test against turbid waters (see the module
+        documentation, Snow and ice).'''
+        iblue, igreen, ired, inir, iswir = (self._wl_index(w) for w in
+                                            (self.bvis, self.bgreen, self.bred, self.bnir, self.bswir))
+        icirrus = self._wl_index(self.bcirrus) if self.bcirrus else None
+        tests = ('NDSI({:.0f}, {:.0f}) > {:.2f}, R({:.0f}) > {:.2f}, R({:.0f}) > {:.2f}, NDVI({:.0f}, {:.0f}) < {:.2f}, '
+                 'R({:.0f}) > {:.2f} R({:.0f})'.format(
+                    self.bgreen, self.bswir, self.ndsi_threshold, self.bnir, self.snow_nir_min,
+                    self.bgreen, self.snow_green_min, self.bnir, self.bred, self.snow_ndvi_max,
+                    self.bvis, self.snow_blue_green_min, self.bgreen))
+        if icirrus is not None:
+            tests += ', cirrus < {:.4f}'.format(self.opac_cirrus_threshold)
+        self._register(bitmasks[0], names[0], descriptions[0] + ': ' + tests +
+                       ', R({:.0f}) >= {:.2f}'.format(self.bgreen, self.ice_green_max))
+        self._register(bitmasks[1], names[1], descriptions[1] + ': ' + tests +
+                       ', R({:.0f}) < {:.2f}'.format(self.bgreen, self.ice_green_max))
+
+        def fn(t):
+            green, nir = t.band(igreen), t.band(inir)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                swir, red = t.band(iswir), t.band(ired)
+                cand = (green - swir) / (green + swir) > self.ndsi_threshold
+                cand &= (nir - red) / (nir + red) < self.snow_ndvi_max
+            cand &= (nir > self.snow_nir_min) & (green > self.snow_green_min)
+            cand &= t.band(iblue) > self.snow_blue_green_min * green
+            if icirrus is not None:
+                cand &= ~(t.band(icirrus) > self.opac_cirrus_threshold)
+            dark = green < self.ice_green_max
+            _set(t.f, bitmasks[0], cand & ~dark)
+            _set(t.f, bitmasks[1], cand & dark)
+
+        bands = [iblue, igreen, ired, inir, iswir] + ([icirrus] if icirrus is not None else [])
+        return _Step(fn, sorted(set(bands)), 0, ())
+
     def _high_swir_step(self,
                         bitmask=7,
                         name='high_swir',
@@ -550,6 +625,11 @@ class Masking(Settings):
         '''Compute the cirrus flags (bits 5, 6) and add them to ``self.flags``.'''
         logging.info('cirrus masking')
         self._run([self._cirrus_step(*args, **kwargs)])
+
+    def snow_ice_mask(self, *args, **kwargs):
+        '''Compute the snow and ice flags (bits 21, 22) and add them to ``self.flags``.'''
+        logging.info('snow and ice masking')
+        self._run([self._snow_ice_step(*args, **kwargs)])
 
     def high_swir_mask(self, *args, **kwargs):
         '''Compute the high SWIR flag (bit 7) and add it to ``self.flags``.'''
@@ -625,8 +705,8 @@ class Masking(Settings):
         Generate the flags raster and attributes in ONE pass over the tiles.
 
         Builds the lazy dask graph of the tile masks (nodata, Landsat QA, water, cirrus if a cirrus band
-        exists, high SWIR, surfwater), then evaluates the flags and the per-flag statistics together with a
-        single ``dask.compute``: every tile is processed once, in parallel. The cloud and cloud shadow flags
+        exists, snow and ice, high SWIR, surfwater), then evaluates the flags and the per-flag statistics together
+        with a single ``dask.compute``: every tile is processed once, in parallel. The cloud and cloud shadow flags
         are then added by OmniCloudMask, run once on a downscaled image (bits ``OCM_BITS``). Previously computed
         flags are discarded. The flags are stored (numpy-backed) in ``self.flags`` and in the dataset
         variable ``flags`` with the attributes ``long_name``, ``flag_names``, ``flag_descriptions`` and
@@ -658,6 +738,7 @@ class Masking(Settings):
 
         if self.bcirrus:
             steps.append(self._cirrus_step())
+        steps.append(self._snow_ice_step())
         steps.append(self._high_swir_step())
 
         steps.append(self._surfwater_step())
@@ -700,6 +781,16 @@ class Masking(Settings):
         :return: boolean DataArray, True for the clear pixels
         '''
         return (flags & np.uint32(sum(1 << b for b in OCM_BITS))) == 0
+
+    @staticmethod
+    def snow_ice(flags):
+        '''
+        Snow or ice pixels: bit ``snow`` or ``ice`` (``SNOW_ICE_BITS``) set.
+
+        :param flags: ``flags`` DataArray (numpy- or dask-backed)
+        :return: boolean DataArray, True for the snow and ice pixels
+        '''
+        return (flags & np.uint32(sum(1 << b for b in SNOW_ICE_BITS))) != 0
 
     @staticmethod
     def _mask_block(block, tomask_value, tokeep_value, _type):
