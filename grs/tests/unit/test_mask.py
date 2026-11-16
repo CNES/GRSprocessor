@@ -597,3 +597,47 @@ class TestMaskCreation:
         print(result)
         np.testing.assert_array_equal(result, expected)
         assert result.name == mask_name
+# ============================================================
+#  Snow and ice
+# ============================================================
+
+def _snow_masking(pixels):
+    '''Masking of a 1 x n Sentinel-2 raster, one pixel per spectrum (TOA reflectance of the bands below).'''
+    wl = [490, 560, 665, 842, 1375, 1610, 2190]
+    cube = np.array([[p[w] for w in wl] for p in pixels], dtype=np.float32).T[:, None, :]
+    prod = xr.Dataset({'bands': (('wl', 'y', 'x'), cube)},
+                      coords={'wl': wl, 'y': [0], 'x': np.arange(len(pixels))},
+                      attrs={'constellation_id': 'S2'})
+    return Masking(prod=prod, tile_size=1024)
+
+
+def _px(b490, b560, b665, b842, b1375=0.001, b1610=0.01, b2190=0.005):
+    return {490: b490, 560: b560, 665: b665, 842: b842, 1375: b1375, 1610: b1610, 2190: b2190}
+
+
+SNOW_CASES = [
+    # name, spectrum, (snow, ice)
+    ('fresh snow', _px(0.70, 0.66, 0.64, 0.62, b1610=0.06), (1, 0)),
+    ('lake ice (Lake Erie)', _px(0.40, 0.36, 0.33, 0.25, b1610=0.007), (0, 1)),
+    ('very turbid water (Rio de la Plata)', _px(0.12, 0.15, 0.16, 0.114, b1610=0.04), (0, 0)),
+    ('clear water', _px(0.09, 0.07, 0.04, 0.02, b1610=0.005), (0, 0)),
+    ('snow under cirrus', _px(0.70, 0.66, 0.64, 0.62, b1375=0.02, b1610=0.06), (0, 0)),
+    ('vegetation', _px(0.05, 0.08, 0.05, 0.35, b1610=0.18), (0, 0)),
+    ('cloud (bright SWIR)', _px(0.50, 0.48, 0.47, 0.46, b1610=0.35), (0, 0)),
+]
+
+
+def test_snow_ice_step():
+    masking = _snow_masking([c[1] for c in SNOW_CASES])
+    masking.snow_ice_mask()
+    flags = masking.flags[0]
+    for k, (name, _, (snow, ice)) in enumerate(SNOW_CASES):
+        assert bool(flags[k] & (1 << 21)) == bool(snow), name
+        assert bool(flags[k] & (1 << 22)) == bool(ice), name
+    assert masking.flag_names[21] == 'snow' and masking.flag_names[22] == 'ice'
+    assert 'NDSI(560, 1610) > 0.40' in masking.flag_descriptions[21]
+
+
+def test_snow_ice_helper():
+    flags = xr.DataArray(np.array([0, 1 << 21, 1 << 22, 1 << 3], dtype=np.uint32))
+    np.testing.assert_array_equal(Masking.snow_ice(flags).values, [False, True, True, False])

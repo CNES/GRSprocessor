@@ -35,6 +35,13 @@ Dates are given for tagged releases only.
   merge requests and releases), unit tests before the PyPI publication, test and coverage summary,
   release/hotfix/bugfix branches, documentation published on tags; `notebooks` extra in `pyproject.toml`.
 
+- Snow and ice flags (`grs.mask`, bits 21 `snow` and 22 `ice`): Fmask-like test on the TOA reflectance (NDSI(560,
+  1610) > 0.4, R(842) > 0.11, R(560) > 0.10, NDVI < 0.1, no opaque cirrus) with a whiteness test R(490) > 1.03
+  R(560) that removes the very turbid waters (brown, NDSI ~0.6); ice when R(560) < 0.5, snow above. Snow and lake
+  ice passed the SWIR water index and were processed as water: they are now excluded from the processed pixels
+  (`Masking.snow_ice`) and set in `mask`. Thresholds in `grs.mask.Settings`. Checked on the AERONET-OC L1C subsets
+  of Lake Erie (ice kept) and Rio de la Plata (turbid plume no longer flagged).
+
 ### Changed
 - Requires GRSdriver >= 2.1.1 (was 2.0.4): 2.1 is the first version reading the Level-1 products in place from
   a bucket (`GRSdriver.remote`), used by the URL inputs above; 2.1.1 gives the Landsat relative azimuth in the
@@ -67,6 +74,9 @@ Dates are given for tagged releases only.
   and GRSdriver >= 2.0.4 (no EOReader, sertit, fiona). The processing code of 3.1.1 is kept.
 
 ### Fixed
+- Negative Rrs flag (`neg_rrs`) moved from bit 18 to bit 23 and set with a bitwise OR: bit 18 is also the Landsat
+  `l1_snow` bit, and the addition carried into bit 19 (`l1_clear`) for a snow pixel with a negative Rrs. Readers of
+  the `neg_rrs` bit of earlier products: bit 18 (the names are in the `flag_names` attribute of `flags`).
 - Images whose water is entirely under clouds (no clear-sky water pixel after the cloud masking) crashed in
   `Kernel.lut_preparation` (`ValueError: zero-size array to reduction operation fmin`, empty angle tables):
   `Process.execute` now logs a warning and stops like an image without water (`no_water`, None returned,

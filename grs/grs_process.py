@@ -278,10 +278,10 @@ class Process:
         self.Nproc = config['processor']['ncpu']
         self.pressure_ref = 101500.
         # mask recipe (bits of grs.mask): keep the water index pixels (3); mask nodata (0), SURFWATER cloud
-        # and shadow (10), OmniCloudMask thick cloud, thin cloud and shadow (11-13), Landsat dilated cloud (14)
-        # and negative Rrs (18)
+        # and shadow (10), OmniCloudMask thick cloud, thin cloud and shadow (11-13), Landsat dilated cloud (14),
+        # snow and ice (21, 22) and negative Rrs (23)
         self.flags_tokeep = [3]
-        self.flags_tomask = [0, 10, 11, 12, 13, 14, 18]
+        self.flags_tomask = [0, 10, 11, 12, 13, 14, 21, 22, 23]
         self.min_water_area = config['settings'].get('min_water_area', 0.)
         self.successful = False
         # True when execute stopped because the image has (almost) no water (see min_water_area)
@@ -659,11 +659,11 @@ class Process:
         if allpixels:
             pass  # masked_raster = prod.raster.bands
         else:
-            # processed pixels: water (SWIR index, no bright SWIR) and clear sky (OmniCloudMask class 0: no
-            # thick cloud, thin cloud or cloud shadow)
-            logging.info('apply water and cloud masking')
+            # processed pixels: water (SWIR index, no bright SWIR), clear sky (OmniCloudMask class 0: no
+            # thick cloud, thin cloud or cloud shadow), neither snow nor ice (snow and ice pass the SWIR index)
+            logging.info('apply water, cloud, snow and ice masking')
             mask = ((ndwi_swir > prod.vis_swir_index_threshold) & (swir2 < prod.sunglint_threshold)
-                    & Masking.clear_sky(prod.raster.flags))
+                    & Masking.clear_sky(prod.raster.flags) & ~Masking.snow_ice(prod.raster.flags))
             bands = prod.raster.bands
             if bands.chunks is None and mask.chunks is None and bands.dims == ('wl', 'y', 'x'):
                 # in memory: set the pixels not processed to NaN in place (``where`` would copy the whole cube)
@@ -678,7 +678,7 @@ class Process:
             # water (min_water_area): self.no_water, None returned, marker file written by write_output
             n_clear = int(mask.sum())
             if n_clear == 0:
-                logging.warning('no clear-sky water pixel (water under clouds or cloud shadows), '
+                logging.warning('no clear-sky water pixel (water under clouds or cloud shadows, or frozen), '
                                 'image not processed')
                 self.no_water = True
                 self.no_water_info = {'image': str(prod.raster.attrs.get('product_name', l1c_prod)
@@ -906,11 +906,12 @@ class Process:
         # Update flags and create mask from recipe
         ##############################################
         logging.info('Update flags and create mask from recipe')
-        # flags for negative blue/green Rrs (lazy, uint32 like the other flags)
-        bitmask = 18
+        # flags for negative blue/green Rrs (lazy, uint32 like the other flags); bit 23, free for both sensors
+        # (bit 18, used up to 3.1.1, is also the Landsat l1_snow bit), set with OR so no other bit is changed
+        bitmask = 23
         negative_rrs = ((l2_prod.Rrs.sel(wl=490, method='nearest') < -0.0005) |
                         (l2_prod.Rrs.sel(wl=565, method='nearest') < -0.0005))
-        prod.raster['flags'] = prod.raster.flags + (negative_rrs.astype(np.uint32) << bitmask)
+        prod.raster['flags'] = prod.raster.flags | (negative_rrs.astype(np.uint32) << bitmask)
         # add name and description
         prod.raster.flags.attrs['flag_descriptions'][bitmask] = 'negative Rrs for blue or green bands'
         prod.raster.flags.attrs['flag_names'][bitmask] = 'neg_rrs'
