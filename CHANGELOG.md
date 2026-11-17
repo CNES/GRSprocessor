@@ -64,6 +64,12 @@ Dates are given for tagged releases only.
     (`CamsProduct.load`, new `grs.cams._select_longitudes`, also for the images across the Greenwich
     meridian). Same CAMS values; about 2x faster from a hard disk (monthly file of 5.3 GB not in the cache:
     239 -> 139 s at AAOT, 235 -> 114 s across the Greenwich meridian, on a busy disk).
+  - OmniCloudMask on the GPU when there is one (`processor: ocm_device` of the configuration, default
+    `'auto'`: CUDA when torch finds a GPU, else CPU; `'cpu'`, `'cuda'`): same products (Sentinel-2 tile
+    32TQR at 60 m, bit-identical Rrs, AOT, mask and flags), cloud screening of the tile 78-101 s -> 27-36 s and
+    `execute` 142-162 s -> 75-78 s on a busy 40-core workstation (Quadro RTX 5000; ~8 s of CUDA start-up at
+    the first call of a process, 0.4 GB of GPU memory). A CUDA failure (e.g. out of GPU memory when several
+    runs share the GPU) logs a warning and runs on the CPU. Product attribute `ocm_device`.
   - LUT preparation: only the window of the radiance LUT around the angles of the image is read, once
     per run, and the aerosol models are mixed before the angular interpolation (45 + 26 s -> 21 + 7 s for
     the first and refined LUTs).

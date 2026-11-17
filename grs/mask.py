@@ -107,6 +107,31 @@ except PackageNotFoundError:
     _OCM_VERSION = 'unknown'
 
 FLAG_NAME = 'flags'
+def _ocm_device(device):
+    '''
+    Device of OmniCloudMask: `device` (``'cpu'``, ``'cuda'``, ``'cuda:1'``...), ``'auto'`` gives ``'cuda'`` when
+    torch finds a GPU, else ``'cpu'``.
+    '''
+    device = str(device or 'cpu').lower()
+    if device != 'auto':
+        return device
+    try:
+        import torch
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    except Exception:   # torch without CUDA support, broken driver
+        return 'cpu'
+
+
+def _empty_cuda_cache():
+    '''Releases the GPU memory cached by torch (after a failed CUDA run of OmniCloudMask)'''
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 # flag bits of the OmniCloudMask classes 1 (thick cloud), 2 (thin cloud) and 3 (cloud shadow)
 OCM_BITS = (11, 12, 13)
 # flag bits of snow and ice
@@ -140,6 +165,11 @@ class Settings:
         Thresholds of the ``snow`` and ``ice`` flags (see the module documentation, Snow and ice).
     OCM_Rband, OCM_Gband, OCM_NIRband : float
         Red, green and NIR bands (nm, nearest available) given to OmniCloudMask.
+    OCM_inference_device, OCM_mosaic_device : str
+        Device of OmniCloudMask: ``'cpu'`` (default), ``'cuda'`` or ``'auto'`` (CUDA when torch finds a GPU,
+        else CPU). Same mask on CPU and GPU in fp32 (Sentinel-2 tile: 0 pixel different); on GPU a tile takes
+        0.5 s instead of 11-13 s, plus ~8 s of CUDA start-up at the first call of the process. A CUDA failure
+        (e.g. out of GPU memory when several runs share the GPU) logs a warning and runs on the CPU.
     OCM_resolution : float or None
         Resolution (m) at which OmniCloudMask runs (default 60; e.g. 100 for speed); the mask is brought
         back to the native grid. None, or a value not above the native pixel size, runs at native resolution.
@@ -180,6 +210,8 @@ class Settings:
         self.OCM_NIRband = 865
         self.OCM_batch_size = 1
         self.OCM_inference_dtype = "fp32"
+        # device of OmniCloudMask (inference and mosaic of the patches): 'cpu', 'cuda' or 'auto' (CUDA when
+        # torch finds a GPU, else CPU); a CUDA failure (e.g. out of GPU memory) falls back to the CPU
         self.OCM_inference_device = 'cpu'
         self.OCM_mosaic_device = 'cpu'
         # resolution (m) at which OmniCloudMask runs (block-averaged bands); the mask is then brought
@@ -449,13 +481,31 @@ class Masking(Settings):
 
         import omnicloudmask as OCM
 
-        coarse = OCM.predict_from_array(np.asarray(rgnir.fillna(0).transpose('wl', 'y', 'x').values,
-                                                   dtype=np.float32),
-                                        batch_size=self.OCM_batch_size,
-                                        inference_dtype=self.OCM_inference_dtype,
-                                        inference_device=self.OCM_inference_device,
-                                        mosaic_device=self.OCM_mosaic_device
-                                        )[0].astype(np.uint8)
+        array = np.asarray(rgnir.fillna(0).transpose('wl', 'y', 'x').values, dtype=np.float32)
+        inference_device = _ocm_device(self.OCM_inference_device)
+        mosaic_device = _ocm_device(self.OCM_mosaic_device)
+
+        def predict(inference_device, mosaic_device):
+            return OCM.predict_from_array(array,
+                                          batch_size=self.OCM_batch_size,
+                                          inference_dtype=self.OCM_inference_dtype,
+                                          inference_device=inference_device,
+                                          mosaic_device=mosaic_device
+                                          )[0].astype(np.uint8)
+
+        if 'cpu' == inference_device == mosaic_device:
+            coarse = predict('cpu', 'cpu')
+        else:
+            try:
+                coarse = predict(inference_device, mosaic_device)
+            except (RuntimeError, AssertionError) as exc:   # out of GPU memory, no usable CUDA device
+                logging.warning('OmniCloudMask on %s failed (%s: %s), run on the CPU',
+                                inference_device, type(exc).__name__, str(exc).splitlines()[0] if str(exc) else '')
+                _empty_cuda_cache()
+                inference_device = mosaic_device = 'cpu'
+                coarse = predict('cpu', 'cpu')
+        self.OCM_device_used = inference_device
+        logging.info('OmniCloudMask device: %s', inference_device)
 
         # back to the native grid: pixel (i, j) takes the class of the block (i // factor, j // factor)
         if factor > 1:

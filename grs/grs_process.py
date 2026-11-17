@@ -276,6 +276,8 @@ class Process:
         self.trans_lut_file = str(lut_path('transmittance'))
         self.cams_dir = config['path']['cams']
         self.Nproc = config['processor']['ncpu']
+        # device of OmniCloudMask (grs.mask.Masking), 'auto': GPU when available
+        self.ocm_device = config['processor'].get('ocm_device', 'cpu')
         self.pressure_ref = 101500.
         # mask recipe (bits of grs.mask): keep the water index pixels (3); mask nodata (0), SURFWATER cloud
         # and shadow (10), OmniCloudMask thick cloud, thin cloud and shadow (11-13), Landsat dilated cloud (14),
@@ -580,7 +582,9 @@ class Process:
                 raise GRS_IO_Exception(surfwater_file, exc)
 
         masking_ = Masking(prod.raster)
+        masking_.OCM_inference_device = masking_.OCM_mosaic_device = self.ocm_device
         prod.raster = masking_.process(output="prod")
+        ocm_device_used = getattr(masking_, 'OCM_device_used', None)
 
         # -- clean up
         prod.raster = prod.raster.drop_vars(["surfwater"])
@@ -937,6 +941,9 @@ class Process:
         prod.raster.attrs['opac_model'] = opac_model
         # wave slope probability of the sunglint normalisation: 'cox_munk_iso' or 'off' (P_slope = 1)
         prod.raster.attrs['p_slope'] = 'cox_munk_iso' if kernel.use_p_slope else 'off'
+        # device on which OmniCloudMask ran ('cpu' or 'cuda'): same mask in fp32
+        if ocm_device_used:
+            prod.raster.attrs['ocm_device'] = ocm_device_used
         # pixel size (meter) of the coarse raster of the aerosol retrieval
         prod.raster.attrs['aot_resolution'] = kernel.coarse_resolution
 
