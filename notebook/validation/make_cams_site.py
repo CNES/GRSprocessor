@@ -21,7 +21,32 @@ import xarray as xr
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))   # before site-packages (an installed grsprocessor would hide the code under test)
 
-from grs.cams import _netcdf_engine, _select_longitudes  # noqa: E402
+import numpy as np  # noqa: E402
+
+try:   # the tool also runs with the code of older versions under test (git worktrees of other commits)
+    from grs.cams import _netcdf_engine  # noqa: E402
+except ImportError:
+    def _netcdf_engine(filepath):
+        with open(filepath, 'rb') as f:
+            return 'scipy' if f.read(4) in (b'CDF\x01', b'CDF\x02') else None
+try:
+    from grs.cams import _select_longitudes  # noqa: E402
+except ImportError:
+    def _select_longitudes(cams, lonmin, lonmax, margin=1):
+        """Copy of grs.cams._select_longitudes (GRSprocessor > 3.1.1+11dd607)"""
+        lon = cams.longitude.values
+        if lon.min() >= 0:
+            if lonmin <= 0 <= lonmax:
+                lon = ((lon + 180) % 360) - 180
+            else:
+                lonmin, lonmax = lonmin % 360, lonmax % 360
+        idx = np.flatnonzero((lon >= lonmin - margin) & (lon <= lonmax + margin))
+        idx = idx[np.argsort(lon[idx], kind='stable')]
+        if idx.size and np.all(np.diff(idx) == 1):
+            cams = cams.isel(longitude=slice(int(idx[0]), int(idx[-1]) + 1))
+        else:
+            cams = cams.isel(longitude=idx)
+        return cams.assign_coords(longitude=lon[idx]), lonmin, lonmax
 
 
 def site_file(cams_file, out_dir):
