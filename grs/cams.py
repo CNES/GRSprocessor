@@ -59,6 +59,35 @@ def _netcdf_engine(filepath):
     return 'scipy' if magic in (b'CDF\x01', b'CDF\x02') else None
 
 
+def _select_longitudes(cams, lonmin, lonmax, margin=1):
+    '''
+    Longitudes of the CAMS grid within `margin` degrees of the image, selected on the lazy dataset (only these
+    columns are read from the file).
+
+    For a grid in 0-360 deg: an image across the Greenwich meridian gets its longitudes in -180-180 deg
+    (columns on both sides of 0, in increasing order), any other image gets its bounds in 0-360 deg.
+
+    :param cams: CAMS dataset (lazy) with a ``longitude`` coordinate in increasing order
+    :param lonmin: western longitude of the image (deg, -180-180)
+    :param lonmax: eastern longitude of the image (deg, -180-180)
+    :param margin: margin (deg) around the image
+    :return: (selected dataset, lonmin, lonmax) with the bounds in the convention of the selected longitudes
+    '''
+    lon = cams.longitude.values
+    if lon.min() >= 0:
+        if lonmin <= 0 <= lonmax:
+            lon = ((lon + 180) % 360) - 180
+        else:
+            lonmin, lonmax = lonmin % 360, lonmax % 360
+    idx = np.flatnonzero((lon >= lonmin - margin) & (lon <= lonmax + margin))
+    idx = idx[np.argsort(lon[idx], kind='stable')]
+    if idx.size and np.all(np.diff(idx) == 1):
+        cams = cams.isel(longitude=slice(int(idx[0]), int(idx[-1]) + 1))
+    else:
+        cams = cams.isel(longitude=idx)
+    return cams.assign_coords(longitude=lon[idx]), lonmin, lonmax
+
+
 class CamsProduct:
     '''
     Unit Conversion:
@@ -213,26 +242,23 @@ class CamsProduct:
         # -------------------------
         # geographical extraction
         # -------------------------
+        # the date and the area are selected on the lazy file, before anything that reads the data (stack,
+        # sortby): only the few chunks of the area are then read, instead of whole latitude bands
         cams = cams.sel(latitude=slice(latmax + 1, latmin - 1))
-        if ('forecast_period' in cams.dims) & ('forecast_reference_time' in cams.dims):
+        new_layout = ('forecast_period' in cams.dims) & ('forecast_reference_time' in cams.dims)
+        if new_layout:
             cams = cams.sel(forecast_reference_time=self.date_day)
+        else:
+            cams = cams.sel(time=self.date_day)
+
+        cams, lonmin, lonmax = _select_longitudes(cams, lonmin, lonmax)
+        cams = cams.load()
+
+        if new_layout:
             cams = cams.stack(time_buffer=['forecast_period', 'forecast_reference_time']).swap_dims(
                 {'time_buffer': 'valid_time'}).sortby('valid_time').rename(
                 {'valid_time': 'time'}).drop_vars(['time_buffer'])
-
-        cams = cams.sel(time=self.date_day)
-
-        # check if image is on Greenwich meridian and adapt longitude convention
-        if cams.longitude.min() >= 0:
-            if lonmin <= 0 and lonmax >= 0:
-
-                cams = cams.assign_coords({"longitude": (((cams.longitude + 180) % 360) - 180)}).sortby('longitude')
-            else:
-                # set longitude between 0 and 360 deg
-                lonmin, lonmax, = lonmin % 360, lonmax % 360
-
-        # slicing
-        cams = cams.sel(longitude=slice(lonmin - 1, lonmax + 1)).load()
+            cams = cams.sel(time=self.date_day)
 
         if cams.u10.shape[0] == 0 or cams.u10.shape[1] == 0:
             print('no cams data, enlarge subset')

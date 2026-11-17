@@ -421,6 +421,63 @@ class TestGetOmnicloudmask:
         assert counts == [0, 0, 0]
         assert masking.omnimask.shape == (32, 32)
 
+    def test_cpu_device_by_default(self, masking_omnicloud):
+        masking = masking_omnicloud
+        masking._ocm_factor = lambda: 1
+        ny, nx = masking.prod.sizes["y"], masking.prod.sizes["x"]
+        with patch("omnicloudmask.predict_from_array", return_value=[np.zeros((ny, nx), np.uint8)]) as mock_predict:
+            masking._get_omnicloudmask()
+        assert mock_predict.call_args.kwargs["inference_device"] == "cpu"
+        assert mock_predict.call_args.kwargs["mosaic_device"] == "cpu"
+        assert masking.OCM_device_used == "cpu"
+
+    def test_cuda_failure_falls_back_to_cpu(self, masking_omnicloud, caplog):
+        # e.g. out of GPU memory when several runs share the GPU: same mask, computed on the CPU
+        masking = masking_omnicloud
+        masking._ocm_factor = lambda: 1
+        masking.OCM_inference_device = masking.OCM_mosaic_device = "cuda"
+        ny, nx = masking.prod.sizes["y"], masking.prod.sizes["x"]
+        coarse = np.zeros((ny, nx), dtype=np.uint8)
+        coarse[0:4, 0:4] = 1
+        devices = []
+
+        def fake_predict(array, **kwargs):
+            devices.append(kwargs["inference_device"])
+            if kwargs["inference_device"] != "cpu":
+                raise RuntimeError("CUDA out of memory. Tried to allocate 1.00 GiB")
+            return [coarse]
+
+        with patch("omnicloudmask.predict_from_array", side_effect=fake_predict):
+            counts = masking._get_omnicloudmask()
+        assert devices == ["cuda", "cpu"]
+        assert masking.OCM_device_used == "cpu"
+        assert counts == [16, 0, 0]
+        assert "run on the CPU" in caplog.text
+
+
+@pytest.mark.parametrize("device, cuda, expected", [
+    ("cpu", True, "cpu"), ("CUDA", False, "cuda"), ("cuda:1", True, "cuda:1"), (None, True, "cpu"),
+    ("auto", True, "cuda"), ("auto", False, "cpu"),
+])
+def test_ocm_device(monkeypatch, device, cuda, expected):
+    import torch
+    from grs.mask import _ocm_device
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    assert _ocm_device(device) == expected
+
+
+def test_ocm_device_of_the_configuration():
+    # packaged default 'auto', passed by Process to the masking (a user configuration may change it)
+    import os
+    import yaml
+    import grs
+    from grs.grs_process import Process
+    from grs.config import load_config
+    with open(os.path.join(os.path.dirname(grs.__file__), 'config.yml')) as f:
+        assert yaml.safe_load(f)["processor"]["ocm_device"] == "auto"
+    assert Process().ocm_device == load_config()["processor"]["ocm_device"]
+
+
 # ============================================================
 #  Tests Statistics
 # ============================================================   

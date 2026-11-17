@@ -67,4 +67,8 @@ aerosol:
 processor:
   ncpu: 8                       # number of processes of the parallel parts
   chunk: 512                    # size (pixels) of the processing blocks
+  # device of the OmniCloudMask cloud screening: 'auto' (GPU when torch finds one, else CPU), 'cpu' or
+  # 'cuda'; same mask, ~0.5 s instead of ~12 s per Sentinel-2 tile on a GPU (+ ~8 s of CUDA start-up per
+  # process); a CUDA failure (e.g. out of GPU memory) falls back to the CPU
+  ocm_device: 'auto'
   netcdf_engine: 'h5netcdf'     # engine used to read the NetCDF inputs
