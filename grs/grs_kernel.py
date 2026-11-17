@@ -443,9 +443,12 @@ class Kernel():
                  prod,
                  aero_lut,
                  trans_lut,
-                 cams):
+                 cams,
+                 use_p_slope=False):
 
         self.prod = prod
+        # wave slope probability in the sunglint normalisation (see p_slope); False: P_slope = 1
+        self.use_p_slope = bool(use_p_slope)
         self.raster = prod.raster
         self.aero_lut = aero_lut
         self.trans_lut = trans_lut
@@ -799,10 +802,11 @@ class Kernel():
            \exp\left(-\frac{\tan^2\theta_N}{\sigma^2}\right) \frac{1}{\cos^4\theta_N},
            \qquad \sigma^2 = \frac{U + 0.586}{195.3}
 
-        Warning: the correction is currently disabled (see the TODO below): the function returns 1
-        everywhere, and NaN where the angles or `sigma2` are NaN (this NaN pattern is used downstream).
-        The slope probability itself is not evaluated (it cost about a third of `final_process_chunk`); the
-        formula is kept in comment below.
+        Switched by ``use_p_slope`` (``settings: p_slope`` of the configuration, ``Process.execute(p_slope=...)``),
+        False by default: the function then returns 1 everywhere, and NaN where the angles or `sigma2` are NaN
+        (this NaN pattern is used downstream), and the slope probability is not evaluated (it costs about a
+        third of `final_process_chunk`). Warning: the formula is not validated (see the TODO below, azimuth
+        convention and consistency of `sigma2`), keep it off for production.
 
         :param sza: solar zenith angle in degree
         :param vza: viewing zenith angle in degree
@@ -812,16 +816,19 @@ class Kernel():
             - monoview = True : same viewing angles for all the spectral bands
             - monoview = False : viewing angles depend on spectral band (e.g. Sentinel-2 images)
 
-        :return: DataArray of ones (y, x) if monoview, else (wl, y, x)
+        :return: DataArray (y, x) if monoview, else (wl, y, x): the slope probability, or ones when
+            ``use_p_slope`` is False
         '''
 
-        # TODO Warning revise equation issue with azimuth: correction discarded!!
-        # when enabled again (stats == 'cm_iso'; TODO check consistency between sigma2 and formulation):
-        #   cosN = self.mu_N(sza, vza, azi, monoview=monoview)
-        #   thetaN = np.arccos(cosN)
-        #   xp_slope = 1. / (np.pi * sigma2) * np.exp(- np.tan(thetaN) ** 2 / sigma2) / cosN ** 4
-        # for now: 1, NaN as soon as one of the inputs is NaN (same shape and dtype as the formula)
-        xp_slope = sza * 0. + vza * 0. + azi * 0. + sigma2 * 0. + 1.
+        # TODO Warning revise equation issue with azimuth (off by default, settings p_slope);
+        #  TODO check consistency between sigma2 and formulation
+        if getattr(self, 'use_p_slope', False):
+            cosN = self.mu_N(sza, vza, azi, monoview=monoview)
+            thetaN = np.arccos(cosN)
+            xp_slope = 1. / (np.pi * sigma2) * np.exp(- np.tan(thetaN) ** 2 / sigma2) / cosN ** 4
+        else:
+            # 1, NaN as soon as one of the inputs is NaN (same shape and dtype as the formula)
+            xp_slope = sza * 0. + vza * 0. + azi * 0. + sigma2 * 0. + 1.
         if monoview:
             return xp_slope.transpose('y', 'x')
         return xp_slope.transpose('wl', 'y', 'x')

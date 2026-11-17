@@ -28,6 +28,11 @@ Dates are given for tagged releases only.
   Rrs (560, 665 nm) against the glint for a grid of AOT; pooled over the blocks under strong glint
   (`glint_aot_min_glint`, default 0.02), their zero crossing gives an AOT clipped to the admissible window
   of the retrieval. Removes most of the glint stripes due to the over-estimated AOT on glinted scenes.
+- Switch of the wave slope probability of the sunglint normalisation (`settings: p_slope` of the configuration
+  or `p_slope` argument of `execute`, default false): false keeps P_slope = 1 (results unchanged), true
+  evaluates the isotropic Cox-Munk probability in `Kernel.p_slope` (development option, not validated:
+  azimuth convention). New `Kernel(use_p_slope=...)` and product attribute `p_slope` (`off` or
+  `cox_munk_iso`).
 - Unit tests of the `Kernel` retrievals (`grs/tests/unit/kernel/`: LUT preparation, coarse rasters, wind,
   SWIR and visible aerosol, final processing), of the masking, output product, configuration, command line,
   exceptions and utilities (from `develop`, PR #24 and #26).

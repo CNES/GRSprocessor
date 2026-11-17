@@ -283,6 +283,8 @@ class Process:
         self.flags_tokeep = [3]
         self.flags_tomask = [0, 10, 11, 12, 13, 14, 21, 22, 23]
         self.min_water_area = config['settings'].get('min_water_area', 0.)
+        # wave slope probability in the sunglint normalisation (Kernel.p_slope), off by default
+        self.p_slope = bool(config['settings'].get('p_slope', False))
         self.successful = False
         # True when execute stopped because the image has (almost) no water (see min_water_area)
         self.no_water = False
@@ -313,6 +315,7 @@ class Process:
                 snap_compliant=False,
                 provide_kernel=False,
                 min_water_area=None,
+                p_slope=None,
                 storage_options=None
                 ):
 
@@ -373,6 +376,9 @@ class Process:
             the configuration (1 km²); 0: stop only without any water pixel. Not used with `allpixels`.
             The processing stops in the same way (``self.no_water``, None returned, marker file) when no
             clear-sky water pixel is left after the cloud masking (water entirely under clouds).
+        :param p_slope: use the Cox-Munk wave slope probability in the sunglint normalisation (see
+            :py:meth:`grs.grs_kernel.Kernel.p_slope`, not validated); None: ``settings: p_slope`` of the
+            configuration (False by default: P_slope = 1)
         :return: the kernel (None if the image has no water or no clear-sky water pixel)
 
         Examples
@@ -713,10 +719,13 @@ class Process:
         ######################################
         # load algorithm kernel
         ######################################
+        if p_slope is None:
+            p_slope = self.p_slope
         self.kernel = Kernel(prod,
                              aero_lut,
                              trans_lut,
-                             cams)
+                             cams,
+                             use_p_slope=p_slope)
         kernel = self.kernel
 
         # option for dev purposes
@@ -926,6 +935,8 @@ class Process:
         l2_prod['central_wavelength'] = ('wl', prod.raster.wl_true.values)
         l2_prod = l2_prod.set_coords('central_wavelength')
         prod.raster.attrs['opac_model'] = opac_model
+        # wave slope probability of the sunglint normalisation: 'cox_munk_iso' or 'off' (P_slope = 1)
+        prod.raster.attrs['p_slope'] = 'cox_munk_iso' if kernel.use_p_slope else 'off'
         # pixel size (meter) of the coarse raster of the aerosol retrieval
         prod.raster.attrs['aot_resolution'] = kernel.coarse_resolution
 

@@ -169,9 +169,11 @@ their different viewing angles):
 
 .. note::
 
-   The slope probability :math:`P_{slope}` is currently set to 1 (see
-   :py:meth:`~grs.grs_kernel.Kernel.p_slope`): the spectral extrapolation then only depends on
-   :math:`\varepsilon(\lambda)` and on the transmittances.
+   The slope probability :math:`P_{slope}` is set to 1 by default (``settings: p_slope: false`` of the
+   configuration, see :py:meth:`~grs.grs_kernel.Kernel.p_slope`): the spectral extrapolation then only
+   depends on :math:`\varepsilon(\lambda)` and on the transmittances. ``p_slope: true`` (or
+   ``Process.execute(p_slope=True)``) evaluates the isotropic Cox-Munk probability with the CAMS wind; it is a
+   development option, not validated yet (azimuth convention).
 
 Remote-sensing reflectance
 --------------------------

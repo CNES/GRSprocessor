@@ -122,6 +122,43 @@ class TestMu_N:
 
 
 # ============================================================
+# Tests p_slope (switch use_p_slope, settings p_slope)
+# ============================================================
+
+class TestPSlope:
+
+    @staticmethod
+    def _angles():
+        def da(v):
+            return xr.DataArray(np.array([[v, v], [v, np.nan]]), dims=("y", "x"))
+        return da(30.), da(30.), da(180.)
+
+    def test_off_by_default(self):
+        """Without use_p_slope (kernel built by __new__ or use_p_slope=False): ones, NaN where an input is NaN."""
+        kernel = Kernel.__new__(Kernel)
+        sza, vza, azi = self._angles()
+        result = kernel.p_slope(sza, vza, azi, sigma2=0.02, monoview=True)
+        assert result.dims == ("y", "x")
+        np.testing.assert_array_equal(result.values, [[1., 1.], [1., np.nan]])
+        kernel.use_p_slope = False
+        np.testing.assert_array_equal(kernel.p_slope(sza, vza, azi, monoview=True).values,
+                                      [[1., 1.], [1., np.nan]])
+
+    def test_on_cox_munk(self):
+        """use_p_slope=True: isotropic Cox-Munk; specular geometry (thetaN = 0) gives 1 / (pi sigma2)."""
+        kernel = Kernel.__new__(Kernel)
+        kernel.use_p_slope = True
+        sza, vza, azi = self._angles()
+        sigma2 = (5 + 0.586) / 195.3
+        result = kernel.p_slope(sza, vza, azi, sigma2=sigma2, monoview=True)
+        np.testing.assert_allclose(result.values[0], 1. / (np.pi * sigma2), rtol=1e-10)
+        assert np.isnan(result.values[1, 1])
+        # off the specular direction the probability decreases
+        off = kernel.p_slope(sza, vza + 10., azi, sigma2=sigma2, monoview=True)
+        assert (off.values[0] < result.values[0]).all()
+
+
+# ============================================================
 # Tests conv_mapping
 # ============================================================
 

@@ -35,6 +35,10 @@ settings:
   # Water pixels: (blue - SWIR1) / (blue + SWIR1) > 0 and SWIR2 < 0.2, the water test of the processing
   # (clouds not yet masked). 0: stop only when no pixel passes the test. Not used with allpixels.
   min_water_area: 1.0
+  # isotropic Cox-Munk wave slope probability P_slope in the spectral normalisation of the sunglint
+  # (Kernel.p_slope; also Process.execute(p_slope=...)). false: P_slope = 1, the sunglint only scales with
+  # the Fresnel reflectance. true is for development: the formula is not validated (azimuth convention)
+  p_slope: false
 
 # retrieval of the aerosol optical thickness (AOT), see the methods page of the documentation; the
 # parameters of the same name of Process.execute override them, aot_resolution also --aot_resolution
