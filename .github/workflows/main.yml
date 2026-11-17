@@ -155,13 +155,13 @@ jobs:
               -u "${{ secrets.DOCKERHUB_LOGIN }}" \
               --password-stdin
 
-          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
-          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
+          podman tag ${DOCKER_IMAGE_NAME}:${VERSION_GRS} docker.io/cnes/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
+          podman tag ${DOCKER_IMAGE_NAME}:latest docker.io/cnes/${DOCKER_IMAGE_NAME}:latest
 
           echo "Publishing ${DOCKER_IMAGE_NAME}:${VERSION_GRS} to docker.io"
-          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
+          podman push docker.io/cnes/${DOCKER_IMAGE_NAME}:${VERSION_GRS}
           echo "Publishing ${DOCKER_IMAGE_NAME}:latest to docker.io"
-          podman push docker.io/${{ secrets.DOCKERHUB_LOGIN }}/${DOCKER_IMAGE_NAME}:latest
+          podman push docker.io/cnes/${DOCKER_IMAGE_NAME}:latest
 
       - name: Publish dev image to Docker Hub (develop)
         if: github.event_name == 'push' && github.ref_name == 'develop'
