@@ -58,6 +58,12 @@ Dates are given for tagged releases only.
   - CAMS NetCDF3 files (monthly global files `cams_forecast_YYYY-MM.nc`) read with the xarray `scipy`
     engine (memory map): the area of an image is read in ~5 s instead of ~50 s from a hard disk when the
     file is not in the cache. The NetCDF4 files (daily archive, ADS downloads) keep the default engine.
+  - CAMS NetCDF4 files of the new ADS layout (`forecast_reference_time` x `forecast_period`, e.g. the monthly
+    global files since 2024-07): the date and the longitudes of the image are selected on the lazy file before
+    the stacking of the forecast times, which read the whole latitude band of the image around the globe
+    (`CamsProduct.load`, new `grs.cams._select_longitudes`, also for the images across the Greenwich
+    meridian). Same CAMS values; about 2x faster from a hard disk (monthly file of 5.3 GB not in the cache:
+    239 -> 139 s at AAOT, 235 -> 114 s across the Greenwich meridian, on a busy disk).
   - LUT preparation: only the window of the radiance LUT around the angles of the image is read, once
     per run, and the aerosol models are mixed before the angular interpolation (45 + 26 s -> 21 + 7 s for
     the first and refined LUTs).

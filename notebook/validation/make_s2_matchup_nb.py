@@ -123,6 +123,8 @@ MAX_CLOUD = 50                               # cloud cover of the tile (%), for 
 
 L1C_DIR = '/data/satellite/s3/grstbx-s3/sentinel-2/l1c'   # <tile>/YYYY/MM/DD/<image>.SAFE
 CAMS_DIR = '/data/cams/world'   # daily global files YYYY/MM/DD/YYYY-MM-DD-cams-...nc, else monthly cams_forecast_YYYY-MM.nc
+CAMS_SITE_DIR = Path('/data/cams/sites') / SITE   # CAMS cells around the site cut out of these files (make_cams_site.py)
+CAMS_SITE_MARGIN = 2.0   # deg
 CACHE = Path('/data/grs/validation/aeronet_oc') / SITE / VERSION
 CACHE.mkdir(parents=True, exist_ok=True)
 
@@ -310,9 +312,13 @@ One run per L1C subset by `process_subset.py` in its own process; `EXTRACT` x `E
 platform are kept in `CACHE/<image>.nc` with the attributes of the run (versions, CAMS file, options). Failures
 are logged in `CACHE/<image>.nc.err` and not retried (delete the file to retry); the subsets without any clear-sky
 water pixel (fully cloudy) get `CACHE/<image>.nc.nowater` instead of an extraction. The images without a CAMS file
-covering their date are left out (`cams_ok`).
+covering their date are left out (`cams_ok`). The runs read the CAMS cells around the site, cut once out of each
+global CAMS file by `make_cams_site.py` into `CAMS_SITE_DIR` (a few MB instead of a global monthly file of several
+GB read again for every image, which took 20 s to several minutes per image from the hard disk).
 ''')
 code(r'''
+from make_cams_site import make as make_cams_site, site_file as site_cams_file
+
 WORKER = Path('process_subset.py').resolve()       # one subprocess per image: memory released between images
 PY = sys.executable
 
@@ -331,8 +337,19 @@ def process(row):
     return f
 
 
-todo = cand[cand.subset.notna() & cand.cams_ok]
+todo = cand[cand.subset.notna() & cand.cams_ok].copy()
 print(len(todo), 'images to process or already cached in', CACHE)
+if PROCESS:   # CAMS files of the site, made once per global CAMS file
+    t0 = time.time()
+    for c in sorted(set(todo.cams)):
+        if not site_cams_file(c, CAMS_SITE_DIR).exists():
+            try:
+                make_cams_site(c, LON, LAT, CAMS_SITE_DIR, CAMS_SITE_MARGIN)
+            except Exception as e:   # the images of this file keep the global file
+                print(Path(c).name, 'FAILED', type(e).__name__, e)
+    print(f'CAMS files of the site in {CAMS_SITE_DIR}: {(time.time() - t0) / 60:.0f} min')
+todo['cams'] = [str(site_cams_file(c, CAMS_SITE_DIR)) if site_cams_file(c, CAMS_SITE_DIR).exists() else c
+                for c in todo.cams]
 if PROCESS:
     t0 = time.time()
     for _, row in todo.iterrows():

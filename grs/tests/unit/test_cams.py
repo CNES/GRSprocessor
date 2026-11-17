@@ -50,3 +50,40 @@ def test_aod_spectrum(cams):
     # aerosol optical depth decreasing with the wavelength
     spectrum = aod.mean(['x', 'y']).sortby('wl').values
     assert np.all(np.diff(spectrum) < 0)
+
+
+def _grid(lon):
+    return xr.Dataset({'u10': (('latitude', 'longitude'), np.tile(np.asarray(lon, float), (3, 1)))},
+                      coords={'latitude': [1., 0., -1.], 'longitude': lon})
+
+
+def test_longitudes_of_the_image():
+    from grs.cams import _select_longitudes
+    cams, lonmin, lonmax = _select_longitudes(_grid(np.arange(0, 360, 0.5)), 12.4, 12.6)
+    assert (lonmin, lonmax) == (12.4, 12.6)
+    assert cams.longitude.values[[0, -1]] == pytest.approx([11.5, 13.5])
+    assert np.all(cams.u10.values == cams.longitude.values)
+
+
+def test_longitudes_west_of_greenwich_in_0_360():
+    from grs.cams import _select_longitudes
+    cams, lonmin, lonmax = _select_longitudes(_grid(np.arange(0, 360, 0.5)), -5.2, -4.8)
+    assert (lonmin, lonmax) == pytest.approx((354.8, 355.2))
+    assert cams.longitude.values[[0, -1]] == pytest.approx([354.0, 356.0])
+
+
+def test_longitudes_across_greenwich():
+    # columns on both sides of 0 in -180-180 deg, in increasing order, with their data
+    from grs.cams import _select_longitudes
+    cams, lonmin, lonmax = _select_longitudes(_grid(np.arange(0, 360, 0.5)), -0.1, 0.1)
+    assert (lonmin, lonmax) == (-0.1, 0.1)
+    lon = cams.longitude.values
+    assert np.all(np.diff(lon) > 0)
+    assert lon[[0, -1]] == pytest.approx([-1.0, 1.0])
+    assert cams.u10.values[0] == pytest.approx(lon % 360)
+
+
+def test_longitudes_of_a_grid_in_180():
+    from grs.cams import _select_longitudes
+    cams, lonmin, lonmax = _select_longitudes(_grid(np.arange(-180, 180, 0.5)), -0.1, 0.1)
+    assert cams.longitude.values[[0, -1]] == pytest.approx([-1.0, 1.0])
