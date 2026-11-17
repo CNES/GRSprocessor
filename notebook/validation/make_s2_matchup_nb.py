@@ -308,7 +308,9 @@ print(f'{cand.subset.notna().sum()} / {len(cand)} candidates with a subset')
 md(r'''
 ## 4. GRSprocessor on the subsets
 
-One run per L1C subset by `process_subset.py` in its own process; `EXTRACT` x `EXTRACT` pixels around the
+The L1C subsets are processed by `process_subset.py --batch`, `BATCH` images per worker process (its imports made
+once per batch, the memory released between the batches; the images left by a worker killed on the way are run
+one per process); `EXTRACT` x `EXTRACT` pixels around the
 platform are kept in `CACHE/<image>.nc` with the attributes of the run (versions, CAMS file, options). Failures
 are logged in `CACHE/<image>.nc.err` and not retried (delete the file to retry); the subsets without any clear-sky
 water pixel (fully cloudy) get `CACHE/<image>.nc.nowater` instead of an extraction. The images without a CAMS file
@@ -319,8 +321,17 @@ GB read again for every image, which took 20 s to several minutes per image from
 code(r'''
 from make_cams_site import make as make_cams_site, site_file as site_cams_file
 
-WORKER = Path('process_subset.py').resolve()       # one subprocess per image: memory released between images
+WORKER = Path('process_subset.py').resolve()       # worker processes: memory released between the batches
 PY = sys.executable
+BATCH = 20      # images per worker process (its imports, ~10 s, made once per batch)
+
+
+def _out(row):
+    return CACHE / f"{row['name'].replace('.SAFE', '')}.nc"
+
+
+def _done(f):
+    return f.exists() or Path(str(f) + '.err').exists() or Path(str(f) + '.nowater').exists()
 
 
 def process(row):
@@ -350,10 +361,35 @@ if PROCESS:   # CAMS files of the site, made once per global CAMS file
     print(f'CAMS files of the site in {CAMS_SITE_DIR}: {(time.time() - t0) / 60:.0f} min')
 todo['cams'] = [str(site_cams_file(c, CAMS_SITE_DIR)) if site_cams_file(c, CAMS_SITE_DIR).exists() else c
                 for c in todo.cams]
+
+
+def process_batch(rows):
+    """Images of `rows` in one worker process; those left undone by a failed worker (killed) are run alone"""
+    rows = [r for r in rows if not _done(_out(r))]
+    if not rows:
+        return
+    jobs = [dict(safe=str(r['subset']), cams=r['cams'], lon=LON, lat=LAT, out=str(_out(r)), extract=EXTRACT,
+                 resolution=RESOLUTION, options=GRS_KW) for r in rows]
+    jf = CACHE / f'.jobs_{os.getpid()}.json'
+    jf.write_text(json.dumps(jobs))
+    r = subprocess.run([PY, str(WORKER), '--batch', str(jf)], capture_output=True, text=True)
+    jf.unlink()
+    for line in r.stdout.splitlines():
+        if '.nc: ' in line:
+            print(line)
+    left = [x for x in rows if not _done(_out(x))]
+    if left:   # worker stopped on the way (killed for its memory, crash): the rest is run one per process
+        print(f'worker stopped (status {r.returncode}, {r.stderr.strip().splitlines()[-1:]}), '
+              f'{len(left)} images run alone')
+        for x in left:
+            process(x)
+
+
 if PROCESS:
     t0 = time.time()
-    for _, row in todo.iterrows():
-        process(row)
+    rows = [row for _, row in todo.iterrows()]
+    for i in range(0, len(rows), BATCH):
+        process_batch(rows[i:i + BATCH])
     print(f'{(time.time() - t0) / 60:.0f} min')
 for e in sorted(CACHE.glob('*.err')):
     print(e.name, '->', e.read_text().splitlines()[0])
