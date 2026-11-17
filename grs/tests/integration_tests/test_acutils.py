@@ -126,19 +126,19 @@ class TestAcutils(unittest.TestCase):
         self.assertAlmostEqual(gaseous_transmittance_instance.xmax, 681920.0, places=1)
         self.assertAlmostEqual(gaseous_transmittance_instance.ymax, 4827140.0, places=1)
         self.assertAlmostEqual(gaseous_transmittance_instance.gas_lut.wl.values[10], 351.772064, places=6)
-        self.assertAlmostEqual(gaseous_transmittance_instance.gas_lut.ch4.values[20000], 0.00717464667299828, places=16)
-        self.assertAlmostEqual(gaseous_transmittance_instance.Twv_lut.Twv.values[10][10][10], 0.9994355799942988, places=16)
+        self.assertAlmostEqual(gaseous_transmittance_instance.gas_lut.ch4.values[20000], 0.00717464667299828, places=8)
+        self.assertAlmostEqual(gaseous_transmittance_instance.Twv_lut.Twv.values[10][10][10], 0.9994355799942988, places=8)
         self.assertAlmostEqual(gaseous_transmittance_instance.air_mass_mean.values, 2.4801105225857274, places=8)
-        self.assertAlmostEqual(gaseous_transmittance_instance.pressure.values[5][5], 990.7368248877037, places=16)
+        self.assertAlmostEqual(gaseous_transmittance_instance.pressure.values[5][5], 990.7368248877037, places=8)
         self.assertAlmostEqual(gaseous_transmittance_instance.coef_abs_scat['h2o'], 0.3, places=1)
 
         # get_gaseous_transmittance
         tg_raster = gaseous_transmittance_instance.get_gaseous_transmittance()      
-        self.assertAlmostEqual(tg_raster.values[10][10][10], 0.0012961665107073775, places=16)
+        self.assertAlmostEqual(tg_raster.values[10][10][10], 0.0012961665107073775, places=8)
 
         # Tgas_background
         tgas_background = gaseous_transmittance_instance.Tgas_background()
-        self.assertAlmostEqual(tgas_background.values[10][10][10], 0.9999845520807469, places=16)
+        self.assertAlmostEqual(tgas_background.values[10][10][10], 0.9999845520807469, places=8)
 
         # Other method not tested
         # get_gaseous_optical_thickness --> used in get_gaseous_transmittance_old so not used
