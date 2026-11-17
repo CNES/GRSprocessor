@@ -139,11 +139,14 @@ Typical sequence (``prod`` = product with ``prod.raster``, ``cams`` = CAMS ancil
     kernel.lut_preparation()
     coarse = kernel.get_coarse_masked_raster(mask=mask)         # water pixels, coarser grid
 
-    wind = kernel.rugosity_est_chunk(coarse)                     # wind speed from sunglint
-    kernel.wind_img = kernel.smoothing(wind)                     # (small) wind map, used by next steps
+    kernel.wind_img = cams.raster.wind.to_dataset().compute()    # CAMS 10 m wind (sigma2 of p_slope)
     kernel.aerosol_swir_chunk(coarse)                            # sets kernel.aot_ref_max
     aot = kernel.aerosol_visible_chunk(coarse_block)             # one value per block, see below
     kernel.final_process(prod.raster, aot_ref_raster)            # lazy: kernel.xres (Rrs, BRDFg, aot550)
+
+The wind speed is not retrieved from the sunglint: `Kernel.rugosity_est_chunk` is kept for development but not
+called by :py:meth:`grs.grs_process.Process.execute` (not validated, and the wind only acts through `Kernel.p_slope`,
+off by default).
 
 Dask design
 ===========
