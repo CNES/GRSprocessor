@@ -144,7 +144,8 @@ jobs:
             --build-arg IMAGE_SOURCE="" \
             --build-arg no_proxy=cnes.fr \
             --file Dockerfile-github \
-            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}"
+            --tag "${DOCKER_IMAGE_NAME}:${VERSION_GRS}" \
+            --tag "${DOCKER_IMAGE_NAME}:latest"
           echo "Build complete"
 
       - name: Publish version tag + latest to Docker Hub (release)
