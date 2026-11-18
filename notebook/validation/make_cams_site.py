@@ -65,12 +65,20 @@ def make(cams_file, lon, lat, out_dir, margin=2.):
         ds = ds.sel(latitude=slice(lat + margin, lat - margin) if lat_desc else slice(lat - margin, lat + margin))
         ds, _, _ = _select_longitudes(ds, lon, lon, margin=margin)
         ds = ds.load()
-    for v in ds.variables.values():   # chunks and compression of the global file do not fit the small arrays
-        v.encoding = {k: x for k, x in v.encoding.items() if k in ('units', 'calendar', 'dtype', '_FillValue')}
+    # chunks and compression of the global file do not fit the small arrays; the values are written decoded
+    # (floats): the int16 packing of the older monthly files (scale_factor, add_offset) is not kept, and its
+    # dtype must not be either (decoded values written as int16 without their scale: wrong pressures, NaN L2A)
+    for v in ds.variables.values():
+        v.encoding = {k: x for k, x in v.encoding.items() if k in ('units', 'calendar')}
     ds.attrs.update(grs_site_source=str(cams_file), grs_site_lon=lon, grs_site_lat=lat, grs_site_margin=margin)
     tmp = out.with_suffix('.nc.tmp')
     ds.to_netcdf(tmp)
-    os.replace(tmp, out)   # complete files only
+    with xr.open_dataset(tmp) as chk:   # the file gives back the values of the global file
+        for k, v in ds.data_vars.items():
+            if not np.allclose(chk[k].values, v.values, rtol=1e-6, atol=0, equal_nan=True):
+                tmp.unlink()
+                raise ValueError(f'{out.name}: {k} differs from {cams_file} once written')
+    os.replace(tmp, out)   # complete and checked files only
     return out
 
 
