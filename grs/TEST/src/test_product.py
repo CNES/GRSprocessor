@@ -68,7 +68,6 @@ class TestProduct(unittest.TestCase):
         self.assertAlmostEqual(prod.xmax, 409800.0, 1)
         self.assertAlmostEqual(prod.ymin, 4790220.0, 1)
         self.assertAlmostEqual(prod.ymax, 4900020.0, 1)
-        self.assertAlmostEqual(float(prod.U), 1.0022856395562, 16)
 
         #load_auxiliary_data used in init, set class attributes
         # Other method not tested

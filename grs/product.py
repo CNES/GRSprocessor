@@ -88,14 +88,7 @@ class Product():
             if self.raster[key].dtype == "float64":
                 self.raster[key] = self.raster[key].astype(np.float32)
 
-        # TODO remove or harmonize with landsat
-        # self.U = self.raster.attrs['REFLECTANCE_CONVERSION_U']
-        # convert into mW cm-2 um-1
-        #self.solar_irradiance = xr.DataArray(self.raster.solar_irradiance / 10,
-        #                                     coords={'wl': self.wl},
-        #                                     attrs={
-        #                                         'description': 'extraterrestrial solar irradiance from satellite metadata',
-        #                                         'units': 'mW cm-2 um-1'})
+        # GRS works on the L1C TOA reflectance: no Earth-Sun distance factor (U) nor solar irradiance needed
 
         self.auxdatabase = auxdatabase
         self.auxdata = None

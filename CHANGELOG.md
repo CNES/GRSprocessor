@@ -125,6 +125,11 @@ Dates are given for tagged releases only.
   was 0). `grs.run.main` returns it (`argv` argument for tests) and closes its log files; the `--no_clobber` check of
   the launcher also finds the Zarr products and the no-water marker.
 
+### Removed
+- `product`: the commented-out Earth-Sun distance factor `U` and solar irradiance of the L1C metadata (unused:
+  GRS works on the L1C TOA reflectance and needs no solar spectrum), and the test of `prod.U` that no longer
+  matched the code.
+
 ## [3.1.0]
 
 ### Added
