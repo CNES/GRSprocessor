@@ -108,6 +108,14 @@ Dates are given for tagged releases only.
   `Kernel.final_process_chunk`: the glint was divided twice by `sunglint_eps`; same normalisation as
   Sentinel-2. On a glinted Landsat 8 scene, the residual Rrs(1610) drops from 2.6e-3 to 0 sr-1 and the
   retrieved AOT from 0.17 to 0.05 (CAMS 0.07).
+- Rayleigh and diffuse-light LUTs interpolated in wavelength in log-log space (`_interp_wl_loglog`, linear
+  interpolation kept where the values are not positive): ~1 % error instead of ~10 % between 400 and 800 nm on
+  the coarse wavelength grid of the LUTs (leave-one-out test on the OSOAA LUT).
+- Aerosol retrieval, `Kernel.aerosol_swir_chunk` and `Kernel.aerosol_visible_chunk`: the diffuse light was taken
+  at the nearest `aot_ref` node of its LUT (step 0.033) while the direct transmittance used the exact tested AOT
+  (step 0.026), which made the number of negative pixels jump from one tested value to the next and the retrieved
+  AOT by up to 0.05. The diffuse light is now interpolated linearly between the neighbouring nodes
+  (`_Rdiff_tables`); unit tests against xarray `interp`.
 - Thread-safe numba threading layer by default (`NUMBA_THREADING_LAYER=threadsafe`: TBB, else OpenMP,
   unless set by the user): the fallback `workqueue` layer aborted the process on the concurrent calls of
   the numba kernels from the dask threads.
