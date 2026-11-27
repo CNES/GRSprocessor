@@ -134,6 +134,8 @@ Dates are given for tagged releases only.
   the launcher also finds the Zarr products and the no-water marker.
 
 ### Removed
+- CI: `pypi` job of `main.yml` (upload with a PyPI token on every tag), which duplicated `pypi.yml` (trusted
+  publishing on the `v*` tags): the second upload of the same version failed with "File already exists".
 - `product`: the commented-out Earth-Sun distance factor `U` and solar irradiance of the L1C metadata (unused:
   GRS works on the L1C TOA reflectance and needs no solar spectrum), and the test of `prod.U` that no longer
   matched the code.

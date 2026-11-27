@@ -281,12 +281,12 @@ GitLab instance for HPC-based validation. Two independent pipelines run on every
 1. `python-tests` — installs the Python dependencies (Python 3.12, no GDAL), then runs the unit
    tests (`grs/tests/unit/`) with coverage, and writes a summary of the tests and of the coverage
    in the job page. On a tag, it also regenerates and commits the coverage badge on `main`.
-2. `pypi` (tags only, needs `python-tests`) — builds the sdist/wheel and publishes it to
-   PyPI.
-3. `podman-build` (needs `python-tests`) — builds the Docker image (`Dockerfile-github`, Ubuntu 24.04,
+2. `podman-build` (needs `python-tests`) — builds the Docker image (`Dockerfile-github`, Ubuntu 24.04,
    Python 3.12); on a tag, it also pushes `guillaumeeb/grs:<tag>` and `:latest` to Docker Hub.
-4. `lint` (pull requests and tags, needs `podman-build`) — runs `ruff` and `mypy` and
+3. `lint` (pull requests and tags, needs `podman-build`) — runs `ruff` and `mypy` and
    uploads their reports as artifacts (non-blocking).
+
+The package is published on PyPI by `pypi.yml` only (below).
 
 **[`gitlab-sync.yml`](.github/workflows/gitlab-sync.yml) — Sync GitLab CNES**: mirrors the Gitflow
 branches (`feature/*`, `release/*`, `hotfix/*`, `bugfix/*`) to the internal GitLab
