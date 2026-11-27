@@ -75,7 +75,7 @@ Dataflow
 .. only:: latex
 
    The dataflow diagram is drawn with Mermaid: see the
-   `online documentation <https://grs.readthedocs.io/en/v3.x/processing_chain.html#dataflow>`__.
+   `online documentation <https://grs.readthedocs.io/en/latest/processing_chain.html#dataflow>`__.
 
 Inputs
 ------
