@@ -74,8 +74,8 @@ html_theme = 'sphinx_book_theme'
 pygments_style = 'sphinx'
 
 html_theme_options = {
-    'repository_url': 'https://github.com/Tristanovsk/grs',
-    'repository_branch': 'master',
+    'repository_url': 'https://github.com/CNES/GRSprocessor',
+    'repository_branch': 'develop',
     'path_to_docs': 'docs/source',
     'use_repository_button': True,
     'use_issues_button': True,
@@ -89,8 +89,8 @@ html_theme_options = {
     },
 }
 
-# Read the Docs builds the stable release (v2.2) from its tag and this pre-release
-# from the v3.x branch: banner on every version but the stable one
+# Read the Docs builds the stable release from the main branch and this pre-release
+# from the develop branch: banner on every version but the stable one
 if os.environ.get('READTHEDOCS_VERSION', 'stable') != 'stable':
     html_theme_options['announcement'] = (
         f'Pre-release documentation of GRSprocessor {release}: see the '
